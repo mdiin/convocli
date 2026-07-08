@@ -2,23 +2,54 @@
   (:require
    [clojure.string :as str]
    [clojure.edn :as edn]
+   [clojure.java.io :as io]
    [cheshire.core :as json]
    [sci.core :as sci]
+   [babashka.process :as process]
    [charm.message :as msg]
    [charm.program :as program]
    [charm.style.border :as border]
    [charm.style.core :as style]
    [charm.ansi.width :as ansi]
    [charm.components.text-input :as text-input]
-   [charm.components.list :as item-list]
    [charm.components.spinner :as spinner]
    [charm.components.viewport :as viewport]
    [babashka.http-client :as http]))
 
+;; ---------------------------------------------------------------------------
+;; Config (see convocli.allium's `config` block)
+;; ---------------------------------------------------------------------------
+
+(def default-config
+  {:llm-endpoint "http://localhost:9090/v1/chat/completions"
+   :llm-model "ministral-3-3b"
+   :context-window-override nil
+   :max-auto-iterations 10})
+
+(def config
+  (merge default-config
+         (when (.exists (io/file "config.edn"))
+           (edn/read-string (slurp "config.edn")))))
+
+;; advertised_context_window is a black box in the spec; there is no
+;; standard OpenAI-compatible endpoint for querying it, so this is a
+;; small heuristic table rather than a real lookup. Set
+;; :context-window-override in config.edn to bypass it entirely.
+(def known-context-windows
+  {"ministral-3-3b" 32768})
+
+(defn advertised-context-window [model]
+  (get known-context-windows model 8192))
+
+(defn context-window-limit []
+  (or (:context-window-override config) (advertised-context-window (:llm-model config))))
+
+;; ---------------------------------------------------------------------------
 ;; ToolConfig loading (see convocli.allium): each entry supplies an
 ;; OpenAI-style function tool definition plus a `mapper` - user-authored
 ;; SCI/Clojure source, evaluated once, that turns the raw JSON arguments
 ;; string the LLM supplied into a shell command string.
+;; ---------------------------------------------------------------------------
 
 (def tool-configs (edn/read-string (slurp "tools.edn")))
 
@@ -47,90 +78,351 @@
   (let [mapper-fn (sci/eval-string* mapper-sci-ctx (:mapper tool-config))]
     (mapper-fn arguments-json)))
 
-(def my-input (text-input/text-input :prompt ":> "
-                                     :placeholder ""))
+;; ---------------------------------------------------------------------------
+;; Conversation persistence (see convocli.allium: Conversation always
+;; resumes on launch). completion_pending is intentionally not persisted:
+;; a stale "awaiting" flag with no request actually in flight would lock
+;; the input forever after a crash/restart.
+;; ---------------------------------------------------------------------------
 
-(defn conversation-log->messages
-  [{:keys [type] :as clog}]
-  (condp = type
-    :llm-response (mapv :message (:value clog))
-    :user-message [(:value clog)]
-    :tool-call [(:value clog)]))
+(def conversation-file "conversation.edn")
 
-(defn call-llm-cmd
-  [q conversation-log]
-  (let [msg {:role "user"
-             :content q}
-        user-cmd (program/cmd (fn []
-                                {:type :user-message
-                                 :unixtime (System/currentTimeMillis)
-                                 :value msg}))
-        llm-cmd (program/cmd (fn []
-                       (let [response (http/post "http://localhost:9090/v1/chat/completions"
-                                                 {:headers {:content-type "application/json"}
-                                                  :body (json/encode {:model "ministral-3-3b"
-                                                                      :tools tools
-                                                                      :messages (into [{:role "system"
-                                                                                        :content "You know Event Modeling (Adam Dymitruk). Your goal is to command the Event Modeling CLI. Whenever you have enough knowledge to invoke a tool, do so."}
-                                                                                       ]
-                                                                                      (conj (vec (flatten (mapv conversation-log->messages conversation-log))) msg))
-                                                                      :prompt_logprobs 0
-                                                                      :cache_prompt true})})
-                             foo (json/parse-string (:body response) true)]
-                         {:type :llm-response
-                          :unixtime (or (:created foo) (System/currentTimeMillis))
-                          :value (:choices foo)})))]
-    (program/sequence-cmds user-cmd llm-cmd)))
+(defn load-conversation []
+  (if (.exists (io/file conversation-file))
+    (edn/read-string (slurp conversation-file))
+    {:conversation-log [] :approval-mode :manual}))
 
-(defn clear-input-cmd
-  []
-  (program/cmd (fn []
-                 {:type :clear-query})))
+(defn save-conversation! [state]
+  (spit conversation-file
+        (pr-str (select-keys state [:conversation-log :approval-mode])))
+  state)
 
-(defn set-waiting-cmd
-  []
-  (program/cmd (fn []
-                 {:type :awaiting-llm})))
+;; ---------------------------------------------------------------------------
+;; Domain helpers (mirrors convocli.allium's derived values/rules)
+;; ---------------------------------------------------------------------------
+
+(def terminal-statuses #{:executed :rejected :interrupted})
+
+(defn visible-messages
+  "Mirrors Conversation.visible_messages: everything from the latest
+  compaction-summary onward (inclusive), or the whole log if none exists."
+  [log]
+  (if-let [idx (last (keep-indexed (fn [i m] (when (= :compaction-summary (:type m)) i)) log))]
+    (subvec log idx)
+    log))
+
+(defn batch? [response]
+  (seq (:tool-calls response)))
+
+(defn all-calls-resolved? [response]
+  (and (batch? response)
+       (every? #(contains? terminal-statuses (:status %)) (:tool-calls response))))
+
+(defn latest-assistant-response-idx [log]
+  (last (keep-indexed (fn [i m] (when (= :assistant-response (:type m)) i)) log)))
+
+(defn latest-assistant-response [log]
+  (when-let [idx (latest-assistant-response-idx log)]
+    (get log idx)))
+
+(defn has-unresolved-batch? [log]
+  (boolean (when-let [r (latest-assistant-response log)]
+             (and (batch? r) (not (all-calls-resolved? r))))))
+
+(defn next-pending-call [response]
+  (first (sort-by :sequence (filter #(= :pending-approval (:status %)) (:tool-calls response)))))
+
+(defn tui-mode
+  "Mirrors tui.allium's TuiSession.mode: a pure function of state, never
+  stored."
+  [state]
+  (cond
+    (has-unresolved-batch? (:conversation-log state)) :reviewing-batch
+    (:completion-pending? state) :awaiting-completion
+    :else :composing))
+
+(defn update-latest-response [log f]
+  (if-let [idx (latest-assistant-response-idx log)]
+    (update log idx f)
+    log))
+
+(defn update-tool-call [response call-id f]
+  (update response :tool-calls
+          (fn [calls] (mapv (fn [c] (if (= (:id c) call-id) (f c) c)) calls))))
+
+;; ---------------------------------------------------------------------------
+;; Building the OpenAI-compatible request from conversation-log
+;; ---------------------------------------------------------------------------
+
+(def system-prompt
+  "You know Event Modeling (Adam Dymitruk). Your goal is to command the Event Modeling CLI. Whenever you have enough knowledge to invoke a tool, do so.")
+
+(defn tool-result-content
+  [tool-call]
+  (case (:status tool-call)
+    :executed (str "exit " (:exit-code tool-call)
+                   (when (seq (:stdout tool-call)) (str "\n" (:stdout tool-call)))
+                   (when (seq (:stderr tool-call)) (str "\nSTDERR:\n" (:stderr tool-call))))
+    :rejected "Rejected by the operator; not executed."
+    :interrupted "Skipped: the operator interrupted auto-run before this call ran."
+    nil))
+
+(defn message->openai
+  [m]
+  (case (:type m)
+    :user-prompt [{:role "user" :content (:text m)}]
+
+    :assistant-response
+    (into [(cond-> {:role "assistant"}
+             (:text m) (assoc :content (:text m))
+             (batch? m) (assoc :tool_calls
+                                (mapv (fn [tc] {:id (:id tc)
+                                                :type "function"
+                                                :function {:name (:tool-name tc) :arguments (:arguments tc)}})
+                                      (:tool-calls m))))]
+          (keep (fn [tc]
+                  (when-let [content (tool-result-content tc)]
+                    {:role "tool" :tool_call_id (:id tc) :content content}))
+                (:tool-calls m)))
+
+    :compaction-summary [{:role "system" :content (str "Earlier conversation summary: " (:summary m))}]
+
+    ;; llm-error / auto-cap-reached / auto-run-interrupted are client-side
+    ;; bookkeeping only; the LLM never sees them directly.
+    []))
+
+(defn conversation->openai-messages [log]
+  (vec (mapcat message->openai log)))
+
+;; ---------------------------------------------------------------------------
+;; Commands (async work; see charm.program/cmd)
+;; ---------------------------------------------------------------------------
+
+(defn request-completion-cmd
+  [conversation-log iteration]
+  (program/cmd
+   (fn []
+     (try
+       (let [response (http/post (:llm-endpoint config)
+                                  {:headers {:content-type "application/json"}
+                                   :body (json/encode
+                                          {:model (:llm-model config)
+                                           :tools tools
+                                           :messages (into [{:role "system" :content system-prompt}]
+                                                            (conversation->openai-messages conversation-log))})})
+             body (json/parse-string (:body response) true)
+             choice (:message (first (:choices body)))]
+         {:type :completion-received
+          :iteration iteration
+          :text (:content choice)
+          :tool-call-proposals (mapv (fn [tc] {:id (:id tc)
+                                                :tool-name (get-in tc [:function :name])
+                                                :arguments (get-in tc [:function :arguments])})
+                                      (:tool_calls choice))
+          :total-tokens (get-in body [:usage :total_tokens] 0)})
+       (catch Exception e
+         {:type :completion-failed :iteration iteration :error (ex-message e)})))))
+
+(defn execute-tool-call-cmd
+  [call]
+  (program/cmd
+   (fn []
+     (let [{:keys [out err exit]} (process/shell {:out :string :err :string :continue true}
+                                                  "bash" "-c" (:command call))]
+       {:type :tool-call-executed :call-id (:id call) :stdout out :stderr err :exit-code exit}))))
+
+;; ---------------------------------------------------------------------------
+;; Proposal -> ToolCall (applies the SCI mapper; see RequestCompletion rule)
+;; ---------------------------------------------------------------------------
+
+(defn proposal->tool-call
+  [sequence {:keys [id tool-name arguments]}]
+  (let [tool-config (get tool-configs-by-name tool-name)]
+    (if (nil? tool-config)
+      {:id id :sequence sequence :tool-name tool-name :arguments arguments
+       :command nil :status :executed :stdout nil :stderr (str "unknown tool: " tool-name)
+       :exit-code nil :executed-at (System/currentTimeMillis)}
+      (try
+        {:id id :sequence sequence :tool-name tool-name :arguments arguments
+         :command (apply-mapper tool-config arguments) :status :pending-approval}
+        (catch Exception e
+          {:id id :sequence sequence :tool-name tool-name :arguments arguments
+           :command nil :status :executed :stdout nil
+           :stderr (str "mapper failed for " tool-name ": " (ex-message e))
+           :exit-code nil :executed-at (System/currentTimeMillis)})))))
+
+;; ---------------------------------------------------------------------------
+;; Compaction (see TriggerCompaction rule)
+;; ---------------------------------------------------------------------------
+
+(defn summarize-for-compaction
+  "Black box in the spec. This is an MVP stand-in - a real implementation
+  would likely ask the LLM to summarize; this just notes the cutoff."
+  [log]
+  (str "[compacted " (count log) " earlier messages]"))
+
+(defn maybe-compact [log]
+  (if-let [r (latest-assistant-response log)]
+    (if (>= (:total-tokens r 0) (context-window-limit))
+      (conj log {:type :compaction-summary :created-at (System/currentTimeMillis)
+                 :summary (summarize-for-compaction log)})
+      log)
+    log))
+
+;; ---------------------------------------------------------------------------
+;; Batch resolution (see BatchResolved rule)
+;; ---------------------------------------------------------------------------
+
+(defn maybe-resolve-batch
+  "If the latest AssistantResponse's batch just became fully resolved,
+  either records why auto-run stopped, or requests the next completion.
+  Returns [state cmd]."
+  [state]
+  (let [log (:conversation-log state)
+        idx (latest-assistant-response-idx log)
+        response (when idx (get log idx))]
+    (if (and response (all-calls-resolved? response))
+      (cond
+        (:interrupted? response)
+        [(update state :conversation-log conj
+                 {:type :auto-run-interrupted :created-at (System/currentTimeMillis)
+                  :calls-skipped (count (filter #(= :interrupted (:status %)) (:tool-calls response)))})
+         nil]
+
+        (and (= :auto-run (:batch-approval-mode response))
+             (>= (:batch-iteration response) (:max-auto-iterations config)))
+        [(update state :conversation-log conj
+                 {:type :auto-cap-reached :created-at (System/currentTimeMillis)
+                  :iterations-run (:batch-iteration response)})
+         nil]
+
+        :else
+        (let [next-iteration (if (= :auto-run (:batch-approval-mode response))
+                                (inc (:batch-iteration response))
+                                0)
+              state' (assoc state :completion-pending? true)]
+          [state' (request-completion-cmd (visible-messages (:conversation-log state')) next-iteration)]))
+      [state nil])))
+
+(defn continue-auto-run-cmd
+  "If the latest response is an unresolved auto_run batch (and not
+  interrupted), returns a cmd to execute its next pending call."
+  [log]
+  (when-let [response (latest-assistant-response log)]
+    (when (and (= :auto-run (:batch-approval-mode response))
+               (not (:interrupted? response)))
+      (when-let [call (next-pending-call response)]
+        (execute-tool-call-cmd call)))))
+
+;; ---------------------------------------------------------------------------
+;; charm.clj wiring
+;; ---------------------------------------------------------------------------
+
+(def my-input (text-input/text-input :prompt ":> " :placeholder ""))
 
 (defn init []
   (let [[s s-cmd] (spinner/spinner-init (spinner/spinner :dots))
-        [vp vp-cmd] (viewport/viewport-init (viewport/viewport ""))]
+        [vp vp-cmd] (viewport/viewport-init (viewport/viewport ""))
+        {:keys [conversation-log approval-mode]} (load-conversation)]
     [{:llm-query my-input
       :spinner s
       :viewport vp
       :current :llm-query
-      :conversation-log []
-      :processing? false
+      :conversation-log conversation-log
+      :approval-mode (or approval-mode :manual)
+      :completion-pending? false
       :terminal-width 120
       :terminal-height 80}
      (program/batch s-cmd vp-cmd)]))
 
-(defn parse-function
-  [{:keys [type] :as tool-call}]
-  (when-let [function (:function tool-call)]
-    (let [{:keys [name arguments]} function
-          tool-config (get tool-configs-by-name name)
-          content (if (nil? tool-config)
-                    (str "unknown tool: " name)
-                    (try
-                      (apply-mapper tool-config arguments)
-                      (catch Exception e
-                        (str "mapper failed for " name ": " (ex-message e)))))]
-      {:content content
-       :role "tool"
-       :tool_call_id (:id tool-call)})))
+(defn submit-prompt [state]
+  (let [text (str/trim (text-input/value (:llm-query state)))]
+    (if (or (str/blank? text) (not= :composing (tui-mode state)))
+      [state nil]
+      (let [new-log (conj (:conversation-log state)
+                           {:type :user-prompt :created-at (System/currentTimeMillis) :text text})
+            state' (-> state
+                       (assoc :conversation-log new-log)
+                       (assoc :completion-pending? true)
+                       (assoc :llm-query (text-input/reset (:llm-query state))))]
+        [state' (request-completion-cmd (visible-messages new-log) 0)]))))
 
-(defn tool-calls-cmd
-  "Converts a seq of tool_call objects to a vector of charm commands."
-  [tool-calls]
-  (let [commands (mapv (fn [tool-call]
-                         (program/cmd (fn []
-                                        {:type :tool-call
-                                         :value (parse-function tool-call)})))
-                       tool-calls)]
-    commands))
+(defn handle-completion-received [state msg]
+  (let [{:keys [iteration text tool-call-proposals total-tokens]} msg
+        tool-calls (vec (map-indexed proposal->tool-call tool-call-proposals))
+        response {:type :assistant-response :created-at (System/currentTimeMillis)
+                   :text text :tool-calls tool-calls
+                   :batch-approval-mode (:approval-mode state)
+                   :batch-iteration iteration
+                   :interrupted? false
+                   :total-tokens total-tokens}
+        log' (maybe-compact (conj (:conversation-log state) response))
+        state' (assoc state :conversation-log log' :completion-pending? false)]
+    (if (all-calls-resolved? response)
+      (maybe-resolve-batch state')
+      (if-let [cmd (continue-auto-run-cmd log')]
+        [state' cmd]
+        [state' nil]))))
 
-(defn update-fn [state msg]
+(defn handle-completion-failed [state msg]
+  [(-> state
+       (update :conversation-log conj
+               {:type :llm-error :created-at (System/currentTimeMillis) :error (:error msg)})
+       (assoc :completion-pending? false))
+   nil])
+
+(defn handle-tool-call-executed [state msg]
+  (let [log' (update-latest-response (:conversation-log state)
+                                      (fn [r] (update-tool-call r (:call-id msg)
+                                                                 (fn [c] (assoc c :status :executed
+                                                                                :stdout (:stdout msg)
+                                                                                :stderr (:stderr msg)
+                                                                                :exit-code (:exit-code msg)
+                                                                                :executed-at (System/currentTimeMillis))))))
+        state' (assoc state :conversation-log log')
+        [state'' cmd] (maybe-resolve-batch state')]
+    (if cmd
+      [state'' cmd]
+      [state'' (continue-auto-run-cmd (:conversation-log state''))])))
+
+(defn approve-current-call [state]
+  (let [response (latest-assistant-response (:conversation-log state))
+        call (and response (= :manual (:batch-approval-mode response)) (next-pending-call response))]
+    (if-not call
+      [state nil]
+      (let [log' (update-latest-response (:conversation-log state)
+                                          #(update-tool-call % (:id call) (fn [c] (assoc c :status :approved))))]
+        [(assoc state :conversation-log log') (execute-tool-call-cmd call)]))))
+
+(defn reject-current-call [state]
+  (let [response (latest-assistant-response (:conversation-log state))
+        call (and response (= :manual (:batch-approval-mode response)) (next-pending-call response))]
+    (if-not call
+      [state nil]
+      (let [log' (update-latest-response (:conversation-log state)
+                                          #(update-tool-call % (:id call) (fn [c] (assoc c :status :rejected))))]
+        (maybe-resolve-batch (assoc state :conversation-log log'))))))
+
+(defn interrupt-auto-run [state]
+  (let [response (latest-assistant-response (:conversation-log state))]
+    (if-not (and response (= :auto-run (:batch-approval-mode response)) (next-pending-call response))
+      [state nil]
+      (let [log' (update-latest-response (:conversation-log state)
+                                          (fn [r]
+                                            (-> r
+                                                (assoc :interrupted? true)
+                                                (update :tool-calls
+                                                        (fn [calls]
+                                                          (mapv (fn [c] (if (= :pending-approval (:status c))
+                                                                          (assoc c :status :interrupted)
+                                                                          c))
+                                                                calls))))))]
+        (maybe-resolve-batch (assoc state :conversation-log log'))))))
+
+(defn toggle-approval-mode [state]
+  [(update state :approval-mode #(if (= % :manual) :auto-run :manual)) nil])
+
+(defn update-fn* [state msg]
   (cond
     (msg/window-size? msg)
     [(assoc state
@@ -142,36 +434,33 @@
     (msg/key-match? msg "ctrl+c")
     [state program/quit-cmd]
 
+    (msg/key-match? msg "ctrl+t")
+    (toggle-approval-mode state)
+
+    (and (= :reviewing-batch (tui-mode state)) (msg/key-match? msg "y"))
+    (approve-current-call state)
+
+    (and (= :reviewing-batch (tui-mode state)) (msg/key-match? msg "n"))
+    (reject-current-call state)
+
+    (and (= :reviewing-batch (tui-mode state)) (msg/key-match? msg "i"))
+    (interrupt-auto-run state)
+
     (msg/key-match? msg "enter")
-    (let [clear-cmd (clear-input-cmd)
-          llm-cmd (call-llm-cmd (text-input/value (get state :llm-query)) (:conversation-log state))
-          waiting-cmd (set-waiting-cmd)]
-      [state (program/batch waiting-cmd clear-cmd llm-cmd)])
+    (submit-prompt state)
 
     (spinner/spinning? (:spinner state) msg)
     (let [[s cmd] (spinner/spinner-update (:spinner state) msg)]
       [(assoc state :spinner s) cmd])
 
-    (= :awaiting-llm (:type msg))
-    [(assoc state :processing? true) nil]
+    (= :completion-received (:type msg))
+    (handle-completion-received state msg)
 
-    (= :clear-query (:type msg))
-    (let [input (text-input/reset (get state :llm-query))]
-      [(assoc state :llm-query input) nil])
+    (= :completion-failed (:type msg))
+    (handle-completion-failed state msg)
 
-    (= :user-message (:type msg))
-    [(update state :conversation-log conj msg) nil]
-
-    (= :llm-response (:type msg))
-    (let [tool-calls (mapcat (comp tool-calls-cmd :tool_calls :message) (:value msg))]
-      [(-> state
-           (update :conversation-log conj msg)
-           (assoc :processing? false))
-       (apply program/sequence-cmds tool-calls)])
-
-    (= :tool-call (:type msg))
-    [(update state :conversation-log conj msg)
-     nil]
+    (= :tool-call-executed (:type msg))
+    (handle-tool-call-executed state msg)
 
     :else
     (let [field (:current state)
@@ -182,101 +471,90 @@
            (assoc :viewport vp))
        (program/batch cmd vp-cmd)])))
 
-(defn render-header
-  []
+(defn update-fn [state msg]
+  (let [[new-state cmd] (update-fn* state msg)]
+    (when (or (not= (:conversation-log state) (:conversation-log new-state))
+              (not= (:approval-mode state) (:approval-mode new-state)))
+      (save-conversation! new-state))
+    [new-state cmd]))
+
+;; ---------------------------------------------------------------------------
+;; Rendering
+;; ---------------------------------------------------------------------------
+
+(defn render-header []
   "ConvoCLI")
 
 (defn wrap-text [text max-width]
-  (let [{:keys [lines current]} (reduce (fn [{:keys [current lines] :as acc} word]
-                                          (let [new-current (if (empty? current)
-                                                              word
-                                                              (str current " " word))]
-                                            (if (> (ansi/string-width new-current) max-width)
-                                              (assoc acc
-                                                     :current word
-                                                     :lines (conj lines current))
-                                              (assoc acc
-                                                     :current new-current
-                                                     :lines lines))))
-
-                                        {:current ""
-                                         :lines []
-                                         }
-                                        (str/split text #" "))]
+  (let [{:keys [lines current]}
+        (reduce (fn [{:keys [current lines] :as acc} word]
+                  (let [new-current (if (empty? current) word (str current " " word))]
+                    (if (> (ansi/string-width new-current) max-width)
+                      (assoc acc :current word :lines (conj lines current))
+                      (assoc acc :current new-current :lines lines))))
+                {:current "" :lines []}
+                (str/split text #" "))]
     (conj lines current)))
 
-(defn wrap-with-prefix
-  [conversation-log {:keys [user-prefix llm-prefix tool-prefix max-width]}]
-  (into []
-        (comp
-         (map (fn [r]
-                (let [messages (conversation-log->messages r)
-                      prefix (condp = (:type r)
-                               :user-message user-prefix
-                               :llm-response llm-prefix
-                               tool-prefix)]
-                  (map (fn [msg]
-                            [r (wrap-text (str (:content msg)) (- max-width (ansi/string-width (str prefix " => ")) 10))])
-                          messages))))
-         (map (fn [[[r [text & texts]]]]
-                (let [prefix (condp = (:type r)
-                               :user-message user-prefix
-                               :llm-response llm-prefix
-                               tool-prefix)]
-                  (into [(str prefix " => " text)] (mapv #(str (str/join (repeat (ansi/string-width (str prefix " => ")) " ")) %) texts))))))
-        conversation-log))
+(defn message-lines
+  [{:keys [type] :as m}]
+  (case type
+    :user-prompt [(str "<O_O> => " (:text m))]
+    :assistant-response
+    (into (if (seq (:text m)) [(str "[*_*] => " (:text m))] [])
+          (map (fn [c] (str ">=> " (:tool-name c) " [" (name (:status c)) "] " (:command c)
+                             (when (= :executed (:status c))
+                               (str " (exit " (:exit-code c) ")"))))
+               (:tool-calls m)))
+    :llm-error [(str "[!!!] LLM error: " (:error m))]
+    :auto-cap-reached [(str "[...] auto-run stopped: hit the " (:iterations-run m) "-iteration cap")]
+    :auto-run-interrupted [(str "[...] auto-run interrupted (" (:calls-skipped m) " call(s) skipped)")]
+    :compaction-summary [(str "[compacted] " (:summary m))]
+    []))
 
 (defn render-content
-  [{:keys [processing? conversation-log spinner viewport terminal-width]}]
-  (style/render
-   (style/style)
-
-   (viewport/viewport-view
-    (viewport/viewport-set-content viewport (str
-                                             (str/join "\n\n"
-                                                       (map (fn [ws] (str/join "\n" ws))
-                                                            (wrap-with-prefix conversation-log {:llm-prefix "[*_*]"
-                                                                                                :user-prefix "<O_O>"
-                                                                                                :tool-prefix ">=>"
-                                                                                         :max-width terminal-width})))
-                                             (when processing?
-                                               (str
-                                                (when (seq conversation-log) "\n\n")
-                                                "[-_o] => "
-                                                (spinner/spinner-view spinner))))))
-
-
-   ))
+  [{:keys [conversation-log spinner viewport terminal-width] :as state}]
+  (let [mode (tui-mode state)
+        lines (mapcat message-lines (visible-messages conversation-log))
+        wrapped (mapcat #(wrap-text % (- terminal-width 10)) lines)
+        status (case mode
+                 :awaiting-completion (str "[-_o] => " (spinner/spinner-view spinner))
+                 :reviewing-batch
+                 (let [response (latest-assistant-response conversation-log)]
+                   (if (= :manual (:batch-approval-mode response))
+                     "[y] approve  [n] reject"
+                     "auto-running... [i] interrupt"))
+                 :composing nil)]
+    (style/render
+     (style/style)
+     (viewport/viewport-view
+      (viewport/viewport-set-content
+       viewport
+       (str (str/join "\n" wrapped)
+            (when status (str (when (seq wrapped) "\n\n") status))))))))
 
 (defn render-footer
-  [query-input]
-  (text-input/text-input-view query-input))
+  [{:keys [approval-mode llm-query]}]
+  (str "[" (name approval-mode) ", ctrl+t to toggle] " (text-input/text-input-view llm-query)))
 
 (defn render-page
   [header content footer & {:keys [width]}]
   (let [w (max 60 (- width 4))]
     (style/join-vertical
      :left
-     (style/render
-      (style/style :width w :align :center :border border/normal)
-      header)
-     (style/render
-      (style/style :width w :align :left :border border/rounded)
-      content)
-     (style/render
-      (style/style :width w :align :left :border border/normal)
-      footer))))
+     (style/render (style/style :width w :align :center :border border/normal) header)
+     (style/render (style/style :width w :align :left :border border/rounded) content)
+     (style/render (style/style :width w :align :left :border border/normal) footer))))
 
 (defn view-2 [state]
-  (let [{:keys [terminal-width]} state]
-    (render-page
-     (render-header)
-     (render-content state)
-     (render-footer (:llm-query state))
-     :width terminal-width)))
+  (render-page
+   (render-header)
+   (render-content state)
+   (render-footer state)
+   :width (:terminal-width state)))
 
 (defn -main [& _args]
   (program/run {:init init
-                      :update #'update-fn
-                      :view #'view-2
-                      :alt-screen true}))
+                :update #'update-fn
+                :view #'view-2
+                :alt-screen true}))

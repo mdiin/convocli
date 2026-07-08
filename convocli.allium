@@ -79,9 +79,12 @@ entity Conversation {
 
     -- Derived
     latest_compaction: max_by(compaction_messages, m => m.created_at)
+    -- Inclusive of the compaction message itself: it carries the condensed
+    -- context that replaces everything before it, so dropping it would
+    -- discard the very thing compaction was meant to preserve.
     visible_messages:
         if exists latest_compaction:
-            messages where created_at > latest_compaction.created_at
+            messages where created_at >= latest_compaction.created_at
         else:
             messages
 
