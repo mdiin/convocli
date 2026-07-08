@@ -41,10 +41,10 @@
         cli-prefix (str (name group-name) " " (name cmd-name))]
     {:name (str (name group-name) "_" (name cmd-name))
      :description (str "Runs `" cli-prefix "` on the Event Modeling CLI")
-     :parameters {:type "object"
-                  :properties props
-                  :required required}
-     :mapper (generic-mapper-source cli-prefix)}))
+     :parameters-schema {:type "object"
+                         :properties props
+                         :required required}
+     :mapper-source (generic-mapper-source cli-prefix)}))
 
 (defn manifest->tool-configs [manifest]
   (vec (mapcat (fn [[group-name commands]]

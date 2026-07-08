@@ -1,6 +1,6 @@
 [{:name "connection_add",
   :description "Runs `connection add` on the Event Modeling CLI",
-  :parameters
+  :parameters-schema
   {:type "object",
    :properties
    {"from"
@@ -10,12 +10,12 @@
     {:type "number",
      :description "to parameter (ref: elements[].id)"}},
    :required ["from" "to"]},
-  :mapper
+  :mapper-source
   "(fn [args-json]\n  (let [args (json-parse args-json)]\n    (str \"connection add\"\n         (apply str\n                (map (fn [[k v]]\n                       (str \" --\" (name k) \" \\\"\"\n                            (if (string? v) v (json-encode v))\n                            \"\\\"\"))\n                     args)))))"}
  {:name "connection_derivations",
   :description
   "Runs `connection derivations` on the Event Modeling CLI",
-  :parameters
+  :parameters-schema
   {:type "object",
    :properties
    {"connection"
@@ -26,11 +26,11 @@
      :description
      "JSON array of derivation objects, e.g. [{\"target_field\":\"orderId\",\"source_fields\":[\"id\"]}]"}},
    :required ["connection" "derivations-json"]},
-  :mapper
+  :mapper-source
   "(fn [args-json]\n  (let [args (json-parse args-json)]\n    (str \"connection derivations\"\n         (apply str\n                (map (fn [[k v]]\n                       (str \" --\" (name k) \" \\\"\"\n                            (if (string? v) v (json-encode v))\n                            \"\\\"\"))\n                     args)))))"}
  {:name "connection_derive",
   :description "Runs `connection derive` on the Event Modeling CLI",
-  :parameters
+  :parameters-schema
   {:type "object",
    :properties
    {"connection"
@@ -44,22 +44,22 @@
      :description
      "comma-separated source field names from the from-element"}},
    :required ["connection" "target" "from"]},
-  :mapper
+  :mapper-source
   "(fn [args-json]\n  (let [args (json-parse args-json)]\n    (str \"connection derive\"\n         (apply str\n                (map (fn [[k v]]\n                       (str \" --\" (name k) \" \\\"\"\n                            (if (string? v) v (json-encode v))\n                            \"\\\"\"))\n                     args)))))"}
  {:name "connection_remove",
   :description "Runs `connection remove` on the Event Modeling CLI",
-  :parameters
+  :parameters-schema
   {:type "object",
    :properties
    {"connection"
     {:type "number",
      :description "connection parameter (ref: connections[].id)"}},
    :required ["connection"]},
-  :mapper
+  :mapper-source
   "(fn [args-json]\n  (let [args (json-parse args-json)]\n    (str \"connection remove\"\n         (apply str\n                (map (fn [[k v]]\n                       (str \" --\" (name k) \" \\\"\"\n                            (if (string? v) v (json-encode v))\n                            \"\\\"\"))\n                     args)))))"}
  {:name "element_origins",
   :description "Runs `element origins` on the Event Modeling CLI",
-  :parameters
+  :parameters-schema
   {:type "object",
    :properties
    {"element"
@@ -70,11 +70,11 @@
      :description
      "JSON array of field-origin objects, e.g. [{\"field\":\"orderId\",\"origin\":\"user_input\"}]"}},
    :required ["element" "origins-json"]},
-  :mapper
+  :mapper-source
   "(fn [args-json]\n  (let [args (json-parse args-json)]\n    (str \"element origins\"\n         (apply str\n                (map (fn [[k v]]\n                       (str \" --\" (name k) \" \\\"\"\n                            (if (string? v) v (json-encode v))\n                            \"\\\"\"))\n                     args)))))"}
  {:name "element_swimlane",
   :description "Runs `element swimlane` on the Event Modeling CLI",
-  :parameters
+  :parameters-schema
   {:type "object",
    :properties
    {"element"
@@ -84,11 +84,11 @@
     {:type "number",
      :description "lane parameter (ref: swimlanes[].id)"}},
    :required ["element" "lane"]},
-  :mapper
+  :mapper-source
   "(fn [args-json]\n  (let [args (json-parse args-json)]\n    (str \"element swimlane\"\n         (apply str\n                (map (fn [[k v]]\n                       (str \" --\" (name k) \" \\\"\"\n                            (if (string? v) v (json-encode v))\n                            \"\\\"\"))\n                     args)))))"}
  {:name "element_fields",
   :description "Runs `element fields` on the Event Modeling CLI",
-  :parameters
+  :parameters-schema
   {:type "object",
    :properties
    {"element"
@@ -99,22 +99,22 @@
      :description
      "JSON array of field objects, e.g. [{\"name\":\"orderId\",\"type\":\"string\"}]"}},
    :required ["element" "fields-json"]},
-  :mapper
+  :mapper-source
   "(fn [args-json]\n  (let [args (json-parse args-json)]\n    (str \"element fields\"\n         (apply str\n                (map (fn [[k v]]\n                       (str \" --\" (name k) \" \\\"\"\n                            (if (string? v) v (json-encode v))\n                            \"\\\"\"))\n                     args)))))"}
  {:name "element_delete",
   :description "Runs `element delete` on the Event Modeling CLI",
-  :parameters
+  :parameters-schema
   {:type "object",
    :properties
    {"element"
     {:type "number",
      :description "element parameter (ref: elements[].id)"}},
    :required ["element"]},
-  :mapper
+  :mapper-source
   "(fn [args-json]\n  (let [args (json-parse args-json)]\n    (str \"element delete\"\n         (apply str\n                (map (fn [[k v]]\n                       (str \" --\" (name k) \" \\\"\"\n                            (if (string? v) v (json-encode v))\n                            \"\\\"\"))\n                     args)))))"}
  {:name "element_rename",
   :description "Runs `element rename` on the Event Modeling CLI",
-  :parameters
+  :parameters-schema
   {:type "object",
    :properties
    {"element"
@@ -122,11 +122,11 @@
      :description "element parameter (ref: elements[].id)"},
     "new-name" {:type "string", :description "new-name parameter"}},
    :required ["element" "new-name"]},
-  :mapper
+  :mapper-source
   "(fn [args-json]\n  (let [args (json-parse args-json)]\n    (str \"element rename\"\n         (apply str\n                (map (fn [[k v]]\n                       (str \" --\" (name k) \" \\\"\"\n                            (if (string? v) v (json-encode v))\n                            \"\\\"\"))\n                     args)))))"}
  {:name "element_context",
   :description "Runs `element context` on the Event Modeling CLI",
-  :parameters
+  :parameters-schema
   {:type "object",
    :properties
    {"element"
@@ -135,11 +135,11 @@
     "new-context"
     {:type "string", :description "new-context parameter"}},
    :required ["element" "new-context"]},
-  :mapper
+  :mapper-source
   "(fn [args-json]\n  (let [args (json-parse args-json)]\n    (str \"element context\"\n         (apply str\n                (map (fn [[k v]]\n                       (str \" --\" (name k) \" \\\"\"\n                            (if (string? v) v (json-encode v))\n                            \"\\\"\"))\n                     args)))))"}
  {:name "element_image",
   :description "Runs `element image` on the Event Modeling CLI",
-  :parameters
+  :parameters-schema
   {:type "object",
    :properties
    {"element"
@@ -147,11 +147,11 @@
      :description "element parameter (ref: elements[].id)"},
     "url" {:type "string", :description "url parameter"}},
    :required ["element" "url"]},
-  :mapper
+  :mapper-source
   "(fn [args-json]\n  (let [args (json-parse args-json)]\n    (str \"element image\"\n         (apply str\n                (map (fn [[k v]]\n                       (str \" --\" (name k) \" \\\"\"\n                            (if (string? v) v (json-encode v))\n                            \"\\\"\"))\n                     args)))))"}
  {:name "element_origin",
   :description "Runs `element origin` on the Event Modeling CLI",
-  :parameters
+  :parameters-schema
   {:type "object",
    :properties
    {"element"
@@ -163,11 +163,11 @@
      :description
      "how the field is introduced: user_input, generated, external"}},
    :required ["element" "field" "origin"]},
-  :mapper
+  :mapper-source
   "(fn [args-json]\n  (let [args (json-parse args-json)]\n    (str \"element origin\"\n         (apply str\n                (map (fn [[k v]]\n                       (str \" --\" (name k) \" \\\"\"\n                            (if (string? v) v (json-encode v))\n                            \"\\\"\"))\n                     args)))))"}
  {:name "element_add",
   :description "Runs `element add` on the Event Modeling CLI",
-  :parameters
+  :parameters-schema
   {:type "object",
    :properties
    {"name" {:type "string", :description "name parameter"},
@@ -176,11 +176,11 @@
      :description "kind parameter",
      :enum ["command" "event" "read_model" "screen" "automation"]}},
    :required ["name" "kind"]},
-  :mapper
+  :mapper-source
   "(fn [args-json]\n  (let [args (json-parse args-json)]\n    (str \"element add\"\n         (apply str\n                (map (fn [[k v]]\n                       (str \" --\" (name k) \" \\\"\"\n                            (if (string? v) v (json-encode v))\n                            \"\\\"\"))\n                     args)))))"}
  {:name "placement_add",
   :description "Runs `placement add` on the Event Modeling CLI",
-  :parameters
+  :parameters-schema
   {:type "object",
    :properties
    {"slice"
@@ -190,11 +190,11 @@
     {:type "number",
      :description "element parameter (ref: elements[].id)"}},
    :required ["slice" "element"]},
-  :mapper
+  :mapper-source
   "(fn [args-json]\n  (let [args (json-parse args-json)]\n    (str \"placement add\"\n         (apply str\n                (map (fn [[k v]]\n                       (str \" --\" (name k) \" \\\"\"\n                            (if (string? v) v (json-encode v))\n                            \"\\\"\"))\n                     args)))))"}
  {:name "placement_remove",
   :description "Runs `placement remove` on the Event Modeling CLI",
-  :parameters
+  :parameters-schema
   {:type "object",
    :properties
    {"placement"
@@ -202,11 +202,11 @@
      :description
      "placement parameter (ref: timelines[].slices[].placements[].id)"}},
    :required ["placement"]},
-  :mapper
+  :mapper-source
   "(fn [args-json]\n  (let [args (json-parse args-json)]\n    (str \"placement remove\"\n         (apply str\n                (map (fn [[k v]]\n                       (str \" --\" (name k) \" \\\"\"\n                            (if (string? v) v (json-encode v))\n                            \"\\\"\"))\n                     args)))))"}
  {:name "placement_reorder",
   :description "Runs `placement reorder` on the Event Modeling CLI",
-  :parameters
+  :parameters-schema
   {:type "object",
    :properties
    {"placement"
@@ -215,11 +215,11 @@
      "placement parameter (ref: timelines[].slices[].placements[].id)"},
     "new-index" {:type "number", :description "new-index parameter"}},
    :required ["placement" "new-index"]},
-  :mapper
+  :mapper-source
   "(fn [args-json]\n  (let [args (json-parse args-json)]\n    (str \"placement reorder\"\n         (apply str\n                (map (fn [[k v]]\n                       (str \" --\" (name k) \" \\\"\"\n                            (if (string? v) v (json-encode v))\n                            \"\\\"\"))\n                     args)))))"}
  {:name "slice_add",
   :description "Runs `slice add` on the Event Modeling CLI",
-  :parameters
+  :parameters-schema
   {:type "object",
    :properties
    {"timeline"
@@ -232,22 +232,22 @@
      :enum ["state_change" "state_view" "automation"]},
     "index" {:type "number", :description "index parameter"}},
    :required ["timeline" "title" "kind" "index"]},
-  :mapper
+  :mapper-source
   "(fn [args-json]\n  (let [args (json-parse args-json)]\n    (str \"slice add\"\n         (apply str\n                (map (fn [[k v]]\n                       (str \" --\" (name k) \" \\\"\"\n                            (if (string? v) v (json-encode v))\n                            \"\\\"\"))\n                     args)))))"}
  {:name "slice_delete",
   :description "Runs `slice delete` on the Event Modeling CLI",
-  :parameters
+  :parameters-schema
   {:type "object",
    :properties
    {"slice"
     {:type "number",
      :description "slice parameter (ref: timelines[].slices[].id)"}},
    :required ["slice"]},
-  :mapper
+  :mapper-source
   "(fn [args-json]\n  (let [args (json-parse args-json)]\n    (str \"slice delete\"\n         (apply str\n                (map (fn [[k v]]\n                       (str \" --\" (name k) \" \\\"\"\n                            (if (string? v) v (json-encode v))\n                            \"\\\"\"))\n                     args)))))"}
  {:name "slice_kind",
   :description "Runs `slice kind` on the Event Modeling CLI",
-  :parameters
+  :parameters-schema
   {:type "object",
    :properties
    {"slice"
@@ -258,11 +258,11 @@
      :description "new-kind parameter",
      :enum ["state_change" "state_view" "automation"]}},
    :required ["slice" "new-kind"]},
-  :mapper
+  :mapper-source
   "(fn [args-json]\n  (let [args (json-parse args-json)]\n    (str \"slice kind\"\n         (apply str\n                (map (fn [[k v]]\n                       (str \" --\" (name k) \" \\\"\"\n                            (if (string? v) v (json-encode v))\n                            \"\\\"\"))\n                     args)))))"}
  {:name "slice_reorder",
   :description "Runs `slice reorder` on the Event Modeling CLI",
-  :parameters
+  :parameters-schema
   {:type "object",
    :properties
    {"slice"
@@ -270,11 +270,11 @@
      :description "slice parameter (ref: timelines[].slices[].id)"},
     "new-index" {:type "number", :description "new-index parameter"}},
    :required ["slice" "new-index"]},
-  :mapper
+  :mapper-source
   "(fn [args-json]\n  (let [args (json-parse args-json)]\n    (str \"slice reorder\"\n         (apply str\n                (map (fn [[k v]]\n                       (str \" --\" (name k) \" \\\"\"\n                            (if (string? v) v (json-encode v))\n                            \"\\\"\"))\n                     args)))))"}
  {:name "slice_status",
   :description "Runs `slice status` on the Event Modeling CLI",
-  :parameters
+  :parameters-schema
   {:type "object",
    :properties
    {"slice"
@@ -285,11 +285,11 @@
      :description "new-status parameter",
      :enum ["created" "in_progress" "done" "informational"]}},
    :required ["slice" "new-status"]},
-  :mapper
+  :mapper-source
   "(fn [args-json]\n  (let [args (json-parse args-json)]\n    (str \"slice status\"\n         (apply str\n                (map (fn [[k v]]\n                       (str \" --\" (name k) \" \\\"\"\n                            (if (string? v) v (json-encode v))\n                            \"\\\"\"))\n                     args)))))"}
  {:name "spec_add",
   :description "Runs `spec add` on the Event Modeling CLI",
-  :parameters
+  :parameters-schema
   {:type "object",
    :properties
    {"slice"
@@ -297,11 +297,11 @@
      :description "slice parameter (ref: timelines[].slices[].id)"},
     "title" {:type "string", :description "title parameter"}},
    :required ["slice" "title"]},
-  :mapper
+  :mapper-source
   "(fn [args-json]\n  (let [args (json-parse args-json)]\n    (str \"spec add\"\n         (apply str\n                (map (fn [[k v]]\n                       (str \" --\" (name k) \" \\\"\"\n                            (if (string? v) v (json-encode v))\n                            \"\\\"\"))\n                     args)))))"}
  {:name "spec_delete",
   :description "Runs `spec delete` on the Event Modeling CLI",
-  :parameters
+  :parameters-schema
   {:type "object",
    :properties
    {"spec"
@@ -309,11 +309,11 @@
      :description
      "spec parameter (ref: timelines[].slices[].specifications[].id)"}},
    :required ["spec"]},
-  :mapper
+  :mapper-source
   "(fn [args-json]\n  (let [args (json-parse args-json)]\n    (str \"spec delete\"\n         (apply str\n                (map (fn [[k v]]\n                       (str \" --\" (name k) \" \\\"\"\n                            (if (string? v) v (json-encode v))\n                            \"\\\"\"))\n                     args)))))"}
  {:name "step_add",
   :description "Runs `step add` on the Event Modeling CLI",
-  :parameters
+  :parameters-schema
   {:type "object",
    :properties
    {"spec"
@@ -329,11 +329,11 @@
      :description "element parameter (ref: elements[].id)"},
     "index" {:type "number", :description "index parameter"}},
    :required ["spec" "clause" "element" "index"]},
-  :mapper
+  :mapper-source
   "(fn [args-json]\n  (let [args (json-parse args-json)]\n    (str \"step add\"\n         (apply str\n                (map (fn [[k v]]\n                       (str \" --\" (name k) \" \\\"\"\n                            (if (string? v) v (json-encode v))\n                            \"\\\"\"))\n                     args)))))"}
  {:name "step_error",
   :description "Runs `step error` on the Event Modeling CLI",
-  :parameters
+  :parameters-schema
   {:type "object",
    :properties
    {"spec"
@@ -343,11 +343,11 @@
     "error-name" {:type "string", :description "error-name parameter"},
     "index" {:type "number", :description "index parameter"}},
    :required ["spec" "error-name" "index"]},
-  :mapper
+  :mapper-source
   "(fn [args-json]\n  (let [args (json-parse args-json)]\n    (str \"step error\"\n         (apply str\n                (map (fn [[k v]]\n                       (str \" --\" (name k) \" \\\"\"\n                            (if (string? v) v (json-encode v))\n                            \"\\\"\"))\n                     args)))))"}
  {:name "step_examples",
   :description "Runs `step examples` on the Event Modeling CLI",
-  :parameters
+  :parameters-schema
   {:type "object",
    :properties
    {"step"
@@ -357,11 +357,11 @@
     "examples-json"
     {:type "object", :description "JSON array of example objects"}},
    :required ["step" "examples-json"]},
-  :mapper
+  :mapper-source
   "(fn [args-json]\n  (let [args (json-parse args-json)]\n    (str \"step examples\"\n         (apply str\n                (map (fn [[k v]]\n                       (str \" --\" (name k) \" \\\"\"\n                            (if (string? v) v (json-encode v))\n                            \"\\\"\"))\n                     args)))))"}
  {:name "step_expect-empty",
   :description "Runs `step expect-empty` on the Event Modeling CLI",
-  :parameters
+  :parameters-schema
   {:type "object",
    :properties
    {"step"
@@ -370,11 +370,11 @@
      "step parameter (ref: timelines[].slices[].specifications[].steps[].id)"},
     "value" {:type "boolean", :description "value parameter"}},
    :required ["step" "value"]},
-  :mapper
+  :mapper-source
   "(fn [args-json]\n  (let [args (json-parse args-json)]\n    (str \"step expect-empty\"\n         (apply str\n                (map (fn [[k v]]\n                       (str \" --\" (name k) \" \\\"\"\n                            (if (string? v) v (json-encode v))\n                            \"\\\"\"))\n                     args)))))"}
  {:name "step_remove",
   :description "Runs `step remove` on the Event Modeling CLI",
-  :parameters
+  :parameters-schema
   {:type "object",
    :properties
    {"step"
@@ -382,32 +382,32 @@
      :description
      "step parameter (ref: timelines[].slices[].specifications[].steps[].id)"}},
    :required ["step"]},
-  :mapper
+  :mapper-source
   "(fn [args-json]\n  (let [args (json-parse args-json)]\n    (str \"step remove\"\n         (apply str\n                (map (fn [[k v]]\n                       (str \" --\" (name k) \" \\\"\"\n                            (if (string? v) v (json-encode v))\n                            \"\\\"\"))\n                     args)))))"}
  {:name "swimlane_add",
   :description "Runs `swimlane add` on the Event Modeling CLI",
-  :parameters
+  :parameters-schema
   {:type "object",
    :properties
    {"name" {:type "string", :description "name parameter"},
     "index" {:type "number", :description "index parameter"}},
    :required ["name" "index"]},
-  :mapper
+  :mapper-source
   "(fn [args-json]\n  (let [args (json-parse args-json)]\n    (str \"swimlane add\"\n         (apply str\n                (map (fn [[k v]]\n                       (str \" --\" (name k) \" \\\"\"\n                            (if (string? v) v (json-encode v))\n                            \"\\\"\"))\n                     args)))))"}
  {:name "swimlane_delete",
   :description "Runs `swimlane delete` on the Event Modeling CLI",
-  :parameters
+  :parameters-schema
   {:type "object",
    :properties
    {"lane"
     {:type "number",
      :description "lane parameter (ref: swimlanes[].id)"}},
    :required ["lane"]},
-  :mapper
+  :mapper-source
   "(fn [args-json]\n  (let [args (json-parse args-json)]\n    (str \"swimlane delete\"\n         (apply str\n                (map (fn [[k v]]\n                       (str \" --\" (name k) \" \\\"\"\n                            (if (string? v) v (json-encode v))\n                            \"\\\"\"))\n                     args)))))"}
  {:name "swimlane_rename",
   :description "Runs `swimlane rename` on the Event Modeling CLI",
-  :parameters
+  :parameters-schema
   {:type "object",
    :properties
    {"lane"
@@ -415,11 +415,11 @@
      :description "lane parameter (ref: swimlanes[].id)"},
     "new-name" {:type "string", :description "new-name parameter"}},
    :required ["lane" "new-name"]},
-  :mapper
+  :mapper-source
   "(fn [args-json]\n  (let [args (json-parse args-json)]\n    (str \"swimlane rename\"\n         (apply str\n                (map (fn [[k v]]\n                       (str \" --\" (name k) \" \\\"\"\n                            (if (string? v) v (json-encode v))\n                            \"\\\"\"))\n                     args)))))"}
  {:name "swimlane_reorder",
   :description "Runs `swimlane reorder` on the Event Modeling CLI",
-  :parameters
+  :parameters-schema
   {:type "object",
    :properties
    {"lane"
@@ -427,31 +427,31 @@
      :description "lane parameter (ref: swimlanes[].id)"},
     "new-index" {:type "number", :description "new-index parameter"}},
    :required ["lane" "new-index"]},
-  :mapper
+  :mapper-source
   "(fn [args-json]\n  (let [args (json-parse args-json)]\n    (str \"swimlane reorder\"\n         (apply str\n                (map (fn [[k v]]\n                       (str \" --\" (name k) \" \\\"\"\n                            (if (string? v) v (json-encode v))\n                            \"\\\"\"))\n                     args)))))"}
  {:name "timeline_add",
   :description "Runs `timeline add` on the Event Modeling CLI",
-  :parameters
+  :parameters-schema
   {:type "object",
    :properties
    {"title" {:type "string", :description "title parameter"}},
    :required ["title"]},
-  :mapper
+  :mapper-source
   "(fn [args-json]\n  (let [args (json-parse args-json)]\n    (str \"timeline add\"\n         (apply str\n                (map (fn [[k v]]\n                       (str \" --\" (name k) \" \\\"\"\n                            (if (string? v) v (json-encode v))\n                            \"\\\"\"))\n                     args)))))"}
  {:name "timeline_delete",
   :description "Runs `timeline delete` on the Event Modeling CLI",
-  :parameters
+  :parameters-schema
   {:type "object",
    :properties
    {"timeline"
     {:type "number",
      :description "timeline parameter (ref: timelines[].id)"}},
    :required ["timeline"]},
-  :mapper
+  :mapper-source
   "(fn [args-json]\n  (let [args (json-parse args-json)]\n    (str \"timeline delete\"\n         (apply str\n                (map (fn [[k v]]\n                       (str \" --\" (name k) \" \\\"\"\n                            (if (string? v) v (json-encode v))\n                            \"\\\"\"))\n                     args)))))"}
  {:name "timeline_rename",
   :description "Runs `timeline rename` on the Event Modeling CLI",
-  :parameters
+  :parameters-schema
   {:type "object",
    :properties
    {"timeline"
@@ -459,5 +459,5 @@
      :description "timeline parameter (ref: timelines[].id)"},
     "new-title" {:type "string", :description "new-title parameter"}},
    :required ["timeline" "new-title"]},
-  :mapper
+  :mapper-source
   "(fn [args-json]\n  (let [args (json-parse args-json)]\n    (str \"timeline rename\"\n         (apply str\n                (map (fn [[k v]]\n                       (str \" --\" (name k) \" \\\"\"\n                            (if (string? v) v (json-encode v))\n                            \"\\\"\"))\n                     args)))))"}]

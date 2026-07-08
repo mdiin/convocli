@@ -21,15 +21,20 @@
 ;; ---------------------------------------------------------------------------
 
 (def default-config
-  {:llm-endpoint "http://localhost:9090/v1/chat/completions"
-   :llm-model "ministral-3-3b"
-   :context-window-override nil
+  {:context-window-override nil
    :max-auto-iterations 10})
 
 (def config
   (merge default-config
          (when (.exists (io/file "config.edn"))
            (edn/read-string (slurp "config.edn")))))
+
+;; llm-endpoint/llm-model are mandatory per convocli.allium's config block
+;; (no default there) - fail loudly at startup rather than silently
+;; running against an endpoint/model nobody chose.
+(doseq [k [:llm-endpoint :llm-model]]
+  (when (nil? (get config k))
+    (throw (ex-info (str "config.edn must set " k) {:missing-key k}))))
 
 ;; advertised_context_window is a black box in the spec; there is no
 ;; standard OpenAI-compatible endpoint for querying it, so this is a
@@ -56,11 +61,11 @@
 (def tool-configs-by-name (into {} (map (juxt :name identity) tool-configs)))
 
 (defn tool-config->openai-tool
-  [{:keys [name description parameters]}]
+  [{:keys [name description parameters-schema]}]
   {:type "function"
    :function {:name name
               :description description
-              :parameters parameters}})
+              :parameters parameters-schema}})
 
 (def tools (mapv tool-config->openai-tool tool-configs))
 
@@ -75,7 +80,7 @@
   "Evaluates tool-config's mapper source and applies it to the raw
   arguments JSON string, returning the shell command it produces."
   [tool-config arguments-json]
-  (let [mapper-fn (sci/eval-string* mapper-sci-ctx (:mapper tool-config))]
+  (let [mapper-fn (sci/eval-string* mapper-sci-ctx (:mapper-source tool-config))]
     (mapper-fn arguments-json)))
 
 ;; ---------------------------------------------------------------------------
