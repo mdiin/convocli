@@ -32,7 +32,8 @@ external entity Operator {}
 
 value ToolCallProposal {
     sequence: Integer          -- position in the order the LLM returned the calls
-    tool_config: ToolConfig
+    tool_name: String         -- raw function name the LLM supplied
+    tool_config: ToolConfig?  -- null if tool_name doesn't match any loaded ToolConfig
     arguments: String
 }
 
@@ -71,6 +72,11 @@ entity Conversation {
     -- True from the moment a completion is requested until the response
     -- (or error) for it arrives. Distinct from has_unresolved_batch: this
     -- covers the LLM round-trip itself, before any batch exists yet.
+    -- Implementations are not required to persist this field across
+    -- restarts the way the rest of Conversation persists: since nothing
+    -- would ever deliver the missing response after a crash, resuming
+    -- with it stuck true would permanently block the operator with no
+    -- way to clear it. Resetting to false on resume is expected.
     completion_pending: Boolean
 
     messages: Message with conversation = this
@@ -167,10 +173,11 @@ variant AutoRunInterrupted : Message {
 
 entity ToolCall {
     message: AssistantResponse
-    tool_config: ToolConfig
+    tool_name: String             -- raw function name the LLM supplied
+    tool_config: ToolConfig?      -- null if tool_name didn't match any loaded ToolConfig
     sequence: Integer             -- position within the batch; presented/approved in this order
     arguments: String             -- raw arguments the LLM supplied for this call
-    command: String?              -- shell command from tool_config.mapper_source(arguments); absent if mapping failed
+    command: String?              -- shell command from tool_config.mapper_source(arguments); absent if unknown tool or mapping failed
 
     -- rejected/interrupted/executed are all terminal with no edit or retry
     -- path: the only way to try again is a fresh UserPrompt, which may
@@ -249,29 +256,46 @@ rule RequestCompletion {
                 total_tokens: outcome.total_tokens
             )
             for proposal in outcome.proposals:
-                let mapping = apply_mapper(proposal.tool_config.mapper_source, proposal.arguments)
-                if exists mapping.error:
+                if not exists proposal.tool_config:
                     ToolCall.created(
                         message: response,
-                        tool_config: proposal.tool_config,
+                        tool_name: proposal.tool_name,
+                        tool_config: null,
                         sequence: proposal.sequence,
                         arguments: proposal.arguments,
                         command: null,
                         status: executed,
                         stdout: null,
-                        stderr: mapping.error,
+                        stderr: unknown_tool_message(proposal.tool_name),
                         exit_code: null,
                         executed_at: now
                     )
                 else:
-                    ToolCall.created(
-                        message: response,
-                        tool_config: proposal.tool_config,
-                        sequence: proposal.sequence,
-                        arguments: proposal.arguments,
-                        command: mapping.command,
-                        status: pending_approval
-                    )
+                    let mapping = apply_mapper(proposal.tool_config.mapper_source, proposal.arguments)
+                    if exists mapping.error:
+                        ToolCall.created(
+                            message: response,
+                            tool_name: proposal.tool_name,
+                            tool_config: proposal.tool_config,
+                            sequence: proposal.sequence,
+                            arguments: proposal.arguments,
+                            command: null,
+                            status: executed,
+                            stdout: null,
+                            stderr: mapping.error,
+                            exit_code: null,
+                            executed_at: now
+                        )
+                    else:
+                        ToolCall.created(
+                            message: response,
+                            tool_name: proposal.tool_name,
+                            tool_config: proposal.tool_config,
+                            sequence: proposal.sequence,
+                            arguments: proposal.arguments,
+                            command: mapping.command,
+                            status: pending_approval
+                        )
 }
 
 -- @guidance
