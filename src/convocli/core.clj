@@ -1,7 +1,9 @@
 (ns convocli.core
   (:require
    [clojure.string :as str]
+   [clojure.edn :as edn]
    [cheshire.core :as json]
+   [sci.core :as sci]
    [charm.message :as msg]
    [charm.program :as program]
    [charm.style.border :as border]
@@ -13,43 +15,37 @@
    [charm.components.viewport :as viewport]
    [babashka.http-client :as http]))
 
-(def type-mapping
-  {"string"  "string"
-   "int"     "number"
-   "boolean" "boolean"
-   "json"    "object"
-   "keyword" "string"})
+;; ToolConfig loading (see convocli.allium): each entry supplies an
+;; OpenAI-style function tool definition plus a `mapper` - user-authored
+;; SCI/Clojure source, evaluated once, that turns the raw JSON arguments
+;; string the LLM supplied into a shell command string.
 
-(defn param->property
-  "Convert parameter to JSON Schema property"
-  [{:keys [flag type values note ref]}]
-  (let [base-desc (or note (str flag " parameter"))
-        desc (if ref (str base-desc " (ref: " ref ")") base-desc)
-        prop {:type (get type-mapping type "string")
-              :description desc}]
-    (if values (assoc prop :enum values) prop)))
+(def tool-configs (edn/read-string (slurp "tools.edn")))
 
-(defn command->tool
-  "Convert command to LLM tool"
-  [[group-name commands]]
-  (map (fn [[cmd-name cmd-def]]
-         (let [params (:params cmd-def)
-               props (into {} (map (fn [p] [(:flag p) (param->property p)]) params))
-               required (vec (map :flag (filter :required params)))]
-           {:type "function"
-            :function {:name (str (name group-name) "_" (name cmd-name))
-                       :description (format "%s %s" (name cmd-name) (name group-name))
-                       :input_schema {:type "object"
-                                      :properties props
-                                      :required required}}}))
-       commands))
+(def tool-configs-by-name (into {} (map (juxt :name identity) tool-configs)))
 
-(defn manifest->tools
-  "Convert entire manifest to tools"
-  [manifest]
-  (vec (mapcat command->tool (:groups manifest))))
+(defn tool-config->openai-tool
+  [{:keys [name description parameters]}]
+  {:type "function"
+   :function {:name name
+              :description description
+              :parameters parameters}})
 
-(def tools (manifest->tools (json/parse-string (slurp "../thecli/manifest.json") true)))
+(def tools (mapv tool-config->openai-tool tool-configs))
+
+;; Mapper source only ever sees json-parse/json-encode - no filesystem,
+;; network or process access - so a broken or malicious mapper can produce
+;; a bad command string but can't do anything else.
+(def mapper-sci-ctx
+  (sci/init {:bindings {'json-parse #(json/parse-string % true)
+                         'json-encode json/encode}}))
+
+(defn apply-mapper
+  "Evaluates tool-config's mapper source and applies it to the raw
+  arguments JSON string, returning the shell command it produces."
+  [tool-config arguments-json]
+  (let [mapper-fn (sci/eval-string* mapper-sci-ctx (:mapper tool-config))]
+    (mapper-fn arguments-json)))
 
 (def my-input (text-input/text-input :prompt ":> "
                                      :placeholder ""))
@@ -111,17 +107,16 @@
 
 (defn parse-function
   [{:keys [type] :as tool-call}]
-  #_{:content "function call"
-   :role "tool"
-   :tool_call_id (:id tool-call)}
   (when-let [function (:function tool-call)]
     (let [{:keys [name arguments]} function
-          [command subcommand] (str/split name #"_")
-          args (str/join " "
-                         (map (fn [[k v]]
-                                (str "--" (clojure.core/name k) " \"" v "\""))
-                              (json/parse-string arguments true)))]
-      {:content (str command " " subcommand " " args)
+          tool-config (get tool-configs-by-name name)
+          content (if (nil? tool-config)
+                    (str "unknown tool: " name)
+                    (try
+                      (apply-mapper tool-config arguments)
+                      (catch Exception e
+                        (str "mapper failed for " name ": " (ex-message e)))))]
+      {:content content
        :role "tool"
        :tool_call_id (:id tool-call)})))
 

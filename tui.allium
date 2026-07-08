@@ -1,0 +1,81 @@
+-- allium: 3
+-- tui.allium
+
+-- Scope: The interaction structure of convocli's terminal interface - what
+--   mode the operator is in at any moment, what's visible/available in
+--   each mode, and how modes relate to convocli.allium's surfaces. This
+--   is a reflection of convocli.allium's domain state, not a new
+--   decision-making layer: mode is a pure derived value, never set by a
+--   rule here, so it cannot drift from what core actually decides.
+-- Includes: the composing/awaiting/reviewing interaction cycle and its
+--   correspondence to convocli.allium's surfaces.
+-- Excludes:
+--   - Pixel/cell-level layout, colours, borders, scrolling mechanics
+--     (charm-specific rendering, see convocli.allium's Excludes)
+--   - Physical keybindings (which literal key performs which action) -
+--     an implementation detail; this spec only says which actions are
+--     available in which mode
+--   - Multiple screens: convocli is one continuous view at all times;
+--     there is no navigation between distinct screens to model
+-- Dependencies: Conversation (completion_pending, has_unresolved_batch)
+--   and the ConvocliSession/ToolCallBatchReview surfaces defined in
+--   convocli.allium.
+
+use "./convocli.allium" as core
+
+------------------------------------------------------------
+-- Entities and Variants
+------------------------------------------------------------
+
+entity TuiSession {
+    conversation: core/Conversation
+
+    -- Derived, never assigned: composing when nothing is in flight and no
+    -- batch is unresolved; awaiting_completion for the LLM round-trip;
+    -- reviewing_batch whenever a batch exists and isn't fully resolved.
+    -- has_unresolved_batch and completion_pending are never both driving
+    -- distinct real states at once in practice (a batch only exists once
+    -- a completion has landed), but reviewing_batch takes priority if it
+    -- ever did.
+    mode:
+        if conversation.has_unresolved_batch:
+            reviewing_batch
+        else if conversation.completion_pending:
+            awaiting_completion
+        else:
+            composing
+}
+
+------------------------------------------------------------
+-- Defaults
+------------------------------------------------------------
+
+-- One TuiSession per Conversation; v1 has exactly one of each.
+default TuiSession the_session = { conversation: core/the_conversation }
+
+------------------------------------------------------------
+-- Surfaces
+------------------------------------------------------------
+
+surface TuiSurface {
+    facing operator: core/Operator
+
+    context session: TuiSession
+
+    exposes:
+        session.mode
+
+    related:
+        core/ConvocliSession(session.conversation)
+
+    @guidance
+        -- session.mode tells the presentation layer what to render, but
+        -- grants no actions of its own: composing means
+        -- core/ConvocliSession's UserSubmitsPrompt is available;
+        -- awaiting_completion means nothing is available, it is a pure
+        -- wait; reviewing_batch means whatever core/ToolCallBatchReview
+        -- (reached via core/ConvocliSession's related clause) currently
+        -- offers for the one unresolved batch - approve/reject the
+        -- next_pending_call in manual mode, or interrupt in auto_run
+        -- mode. UserSetsApprovalMode is available in every mode.
+}

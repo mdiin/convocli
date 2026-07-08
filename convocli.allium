@@ -1,0 +1,421 @@
+-- allium: 3
+-- convocli.allium
+
+-- Scope: The conversational loop that lets a user drive external CLI tools
+--   through a local LLM: sending messages, the LLM proposing tool calls,
+--   the user approving or rejecting them, execution, and feeding results
+--   back to the LLM. Also covers conversation persistence and compaction.
+-- Includes: Conversation, Message, ToolConfig, ToolCall, approval flow,
+--   auto-run mode and its iteration cap, compaction.
+-- Excludes:
+--   - Multi-user / remote execution (single local user only)
+--   - Authentication toward the LLM endpoint
+--   - The TUI rendering layer itself (charm-based presentation)
+--   - The SCI mapper execution engine internals (treated as a black box)
+--   - The wire format of the OpenAI-compatible chat completions call itself
+-- v1 note: multiple ToolConfigs can be loaded into one combined toolset,
+--   but the first implementation only needs to support a single ToolConfig.
+-- v1 note: there is exactly one persistent Conversation; convocli always
+--   resumes it on launch. Multiple/named conversations are not in scope yet.
+
+------------------------------------------------------------
+-- External Entities
+------------------------------------------------------------
+
+-- The single local human at the terminal. Who they are, and how they
+-- authenticate to the machine, is out of scope (see Excludes).
+external entity Operator {}
+
+------------------------------------------------------------
+-- Value Types
+------------------------------------------------------------
+
+value ToolCallProposal {
+    sequence: Integer          -- position in the order the LLM returned the calls
+    tool_config: ToolConfig
+    arguments: String
+}
+
+value CompletionOutcome {
+    text: String?
+    error: String?
+    proposals: List<ToolCallProposal>
+    total_tokens: Integer?    -- token usage reported by the completion response; absent on error
+}
+
+value MappingOutcome {
+    command: String?
+    error: String?
+}
+
+value ExecutionOutcome {
+    stdout: String
+    stderr: String
+    exit_code: Integer
+}
+
+------------------------------------------------------------
+-- Entities and Variants
+------------------------------------------------------------
+
+entity ToolConfig {
+    name: String
+    description: String
+    parameters_schema: String    -- OpenAI tool-schema JSON Schema for arguments, opaque here
+    mapper_source: String        -- user-authored SCI/Clojure source: arguments -> shell command
+}
+
+entity Conversation {
+    approval_mode: manual | auto_run
+
+    -- True from the moment a completion is requested until the response
+    -- (or error) for it arrives. Distinct from has_unresolved_batch: this
+    -- covers the LLM round-trip itself, before any batch exists yet.
+    completion_pending: Boolean
+
+    messages: Message with conversation = this
+    assistant_responses: AssistantResponse with conversation = this
+    compaction_messages: messages where kind = CompactionSummary
+
+    -- Derived
+    latest_compaction: max_by(compaction_messages, m => m.created_at)
+    visible_messages:
+        if exists latest_compaction:
+            messages where created_at > latest_compaction.created_at
+        else:
+            messages
+
+    -- True while some AssistantResponse's tool calls haven't all been
+    -- executed, rejected or interrupted yet. Only one batch is ever
+    -- unresolved at a time (see ToolCallBatchReview's @guarantee).
+    has_unresolved_batch: assistant_responses.any(r => not r.all_calls_resolved)
+
+    transitions approval_mode {
+        manual -> auto_run
+        auto_run -> manual
+    }
+}
+
+entity Message {
+    conversation: Conversation
+    created_at: Timestamp
+    kind: UserPrompt | AssistantResponse | CompactionSummary | LlmError | AutoCapReached | AutoRunInterrupted
+}
+
+variant UserPrompt : Message {
+    text: String
+}
+
+variant AssistantResponse : Message {
+    text: String?
+    tool_calls: ToolCall with message = this
+
+    -- Snapshot taken at creation: a batch always finishes under the mode
+    -- that was active when the LLM produced it, even if the user later
+    -- toggles Conversation.approval_mode mid-batch.
+    batch_approval_mode: manual | auto_run
+
+    -- Count of consecutive automatic (auto_run) round-trips to the LLM
+    -- that led here without a fresh UserPrompt. Reset to 0 whenever a
+    -- batch is manual, since a human gates every step and no runaway
+    -- loop is possible in that mode.
+    batch_iteration: Integer
+
+    -- Set true when the user interrupts this batch mid-flight. Only
+    -- meaningful while batch_approval_mode = auto_run; skips remaining
+    -- pending_approval calls in this batch and suppresses the automatic
+    -- follow-up completion, without changing Conversation.approval_mode.
+    interrupted: Boolean
+
+    -- Total token usage reported by the completion response that produced
+    -- this message (prompt + completion tokens, as the endpoint reports
+    -- it). Drives compaction; there is no separate client-side tokenizer.
+    total_tokens: Integer
+
+    -- Derived
+    all_calls_resolved: tool_calls.count > 0 and tool_calls.all(c => c.status in {executed, rejected, interrupted})
+    skipped_calls: tool_calls where status = interrupted
+
+    -- Approval is strictly sequential: only the lowest-sequence pending
+    -- call can be approved/rejected at any moment. Null once none remain.
+    next_pending_call: min_by(tool_calls where status = pending_approval, c => c.sequence)
+}
+
+variant CompactionSummary : Message {
+    summary: String
+}
+
+variant LlmError : Message {
+    error: String
+}
+
+variant AutoCapReached : Message {
+    -- Auto-run halted itself after this many consecutive iterations;
+    -- control returns to the user rather than auto-requesting a new
+    -- completion.
+    iterations_run: Integer
+}
+
+variant AutoRunInterrupted : Message {
+    -- User-initiated stop of an in-flight auto-run batch; control
+    -- returns to the user rather than auto-requesting a new completion.
+    calls_skipped: Integer
+}
+
+entity ToolCall {
+    message: AssistantResponse
+    tool_config: ToolConfig
+    sequence: Integer             -- position within the batch; presented/approved in this order
+    arguments: String             -- raw arguments the LLM supplied for this call
+    command: String?              -- shell command from tool_config.mapper_source(arguments); absent if mapping failed
+
+    -- rejected/interrupted/executed are all terminal with no edit or retry
+    -- path: the only way to try again is a fresh UserPrompt, which may
+    -- lead the LLM to propose a new ToolCall with corrected arguments.
+    status: pending_approval | approved | rejected | executed | interrupted
+    stdout: String? when status = executed
+    stderr: String? when status = executed
+    exit_code: Integer? when status = executed
+    executed_at: Timestamp? when status = executed
+
+    transitions status {
+        pending_approval -> approved
+        pending_approval -> executed    -- auto-run mode, or a mapping failure recorded as a failed command
+        approved -> executed
+        pending_approval -> rejected
+        pending_approval -> interrupted -- user interrupted the batch before this call ran
+        terminal: executed, rejected, interrupted
+    }
+}
+
+------------------------------------------------------------
+-- Config
+------------------------------------------------------------
+
+config {
+    llm_endpoint: String                    -- OpenAI-compatible chat completions URL
+    llm_model: String
+    context_window_override: Integer?       -- overrides the model-advertised context window (in tokens) when set
+    max_auto_iterations: Integer = 10       -- cap on consecutive auto_run round-trips per turn
+}
+
+------------------------------------------------------------
+-- Defaults
+------------------------------------------------------------
+
+-- Exactly one Conversation exists; convocli always resumes it on launch.
+default Conversation the_conversation = { approval_mode: manual, completion_pending: false }
+
+------------------------------------------------------------
+-- Rules
+------------------------------------------------------------
+
+-- @guidance
+--     request_completion, apply_mapper and run_command wrap genuinely
+--     non-deterministic, side-effecting operations (a network call to the
+--     LLM endpoint, evaluating user-authored SCI source, spawning a shell
+--     process). They are modelled as black box functions because Allium
+--     has no other construct for external interaction, not because they
+--     are pure.
+
+rule UserSubmitsMessage {
+    when: UserSubmitsPrompt(operator, conversation, text)
+    requires: not conversation.has_unresolved_batch
+    requires: not conversation.completion_pending
+    ensures:
+        UserPrompt.created(conversation: conversation, created_at: now, text: text)
+        conversation.completion_pending = true
+        RequestLlmCompletion(conversation: conversation, iteration: 0)
+}
+
+rule RequestCompletion {
+    when: RequestLlmCompletion(conversation, iteration)
+    let outcome = request_completion(conversation.visible_messages, ToolConfigs, config.llm_endpoint, config.llm_model)
+    ensures:
+        conversation.completion_pending = false
+        if exists outcome.error:
+            LlmError.created(conversation: conversation, created_at: now, error: outcome.error)
+        else:
+            let response = AssistantResponse.created(
+                conversation: conversation,
+                created_at: now,
+                text: outcome.text,
+                batch_approval_mode: conversation.approval_mode,
+                batch_iteration: iteration,
+                interrupted: false,
+                total_tokens: outcome.total_tokens
+            )
+            for proposal in outcome.proposals:
+                let mapping = apply_mapper(proposal.tool_config.mapper_source, proposal.arguments)
+                if exists mapping.error:
+                    ToolCall.created(
+                        message: response,
+                        tool_config: proposal.tool_config,
+                        sequence: proposal.sequence,
+                        arguments: proposal.arguments,
+                        command: null,
+                        status: executed,
+                        stdout: null,
+                        stderr: mapping.error,
+                        exit_code: null,
+                        executed_at: now
+                    )
+                else:
+                    ToolCall.created(
+                        message: response,
+                        tool_config: proposal.tool_config,
+                        sequence: proposal.sequence,
+                        arguments: proposal.arguments,
+                        command: mapping.command,
+                        status: pending_approval
+                    )
+}
+
+-- @guidance
+--     AutoExecuteToolCall, UserApprovesToolCall and UserRejectsToolCall all
+--     match ToolCall.status = pending_approval, but their batch_approval_mode
+--     guards (auto_run vs manual) are mutually exclusive, so at most one can
+--     ever fire for a given ToolCall. `allium analyse` flags this as a
+--     status conflict because it does not reason across enum guards between
+--     an entity-creation trigger and external-stimulus triggers; reviewed
+--     and confirmed not a real ambiguity.
+
+rule AutoExecuteToolCall {
+    when: tool_call: ToolCall.created
+    requires: tool_call.status = pending_approval
+    requires: tool_call.message.batch_approval_mode = auto_run
+    requires: not tool_call.message.interrupted
+    let result = run_command(tool_call.command)
+    ensures:
+        tool_call.status = executed
+        tool_call.stdout = result.stdout
+        tool_call.stderr = result.stderr
+        tool_call.exit_code = result.exit_code
+        tool_call.executed_at = now
+}
+
+rule UserApprovesToolCall {
+    when: UserApprovesToolCall(operator, tool_call)
+    requires: tool_call.status = pending_approval
+    requires: tool_call.message.batch_approval_mode = manual
+    requires: tool_call = tool_call.message.next_pending_call
+    ensures: tool_call.status = approved
+}
+
+rule ExecuteApprovedToolCall {
+    when: tool_call: ToolCall.status transitions_to approved
+    let result = run_command(tool_call.command)
+    ensures:
+        tool_call.status = executed
+        tool_call.stdout = result.stdout
+        tool_call.stderr = result.stderr
+        tool_call.exit_code = result.exit_code
+        tool_call.executed_at = now
+}
+
+rule UserRejectsToolCall {
+    when: UserRejectsToolCall(operator, tool_call)
+    requires: tool_call.status = pending_approval
+    requires: tool_call.message.batch_approval_mode = manual
+    requires: tool_call = tool_call.message.next_pending_call
+    ensures: tool_call.status = rejected
+}
+
+rule UserSetsApprovalMode {
+    when: UserSetsApprovalMode(operator, conversation, mode)
+    ensures: conversation.approval_mode = mode
+}
+
+rule UserInterruptsAutoRun {
+    when: UserInterruptsAutoRun(operator, response)
+    requires: response.batch_approval_mode = auto_run
+    requires: not response.all_calls_resolved
+    ensures: response.interrupted = true
+}
+
+rule SkipRemainingCallsOnInterrupt {
+    when: response: AssistantResponse.interrupted becomes true
+    ensures:
+        for call in response.tool_calls where status = pending_approval:
+            call.status = interrupted
+}
+
+rule BatchResolved {
+    when: response: AssistantResponse.all_calls_resolved
+    ensures:
+        if response.interrupted:
+            AutoRunInterrupted.created(conversation: response.conversation, created_at: now, calls_skipped: response.skipped_calls.count)
+        else:
+            if response.batch_approval_mode = auto_run and response.batch_iteration >= config.max_auto_iterations:
+                AutoCapReached.created(conversation: response.conversation, created_at: now, iterations_run: response.batch_iteration)
+            else:
+                let next_iteration = if response.batch_approval_mode = auto_run: response.batch_iteration + 1 else: 0
+                response.conversation.completion_pending = true
+                RequestLlmCompletion(conversation: response.conversation, iteration: next_iteration)
+}
+
+rule TriggerCompaction {
+    when: response: AssistantResponse.created
+    let window_limit = config.context_window_override ?? advertised_context_window(config.llm_model)
+    requires: response.total_tokens >= window_limit
+    ensures:
+        CompactionSummary.created(
+            conversation: response.conversation,
+            created_at: now,
+            summary: summarize(response.conversation.visible_messages)
+        )
+}
+
+------------------------------------------------------------
+-- Surfaces
+------------------------------------------------------------
+
+surface ConvocliSession {
+    facing operator: Operator
+
+    context conversation: Conversation
+
+    exposes:
+        conversation.approval_mode
+        conversation.visible_messages
+        conversation.completion_pending
+
+    provides:
+        UserSubmitsPrompt(operator, conversation, text)
+            when not conversation.has_unresolved_batch and not conversation.completion_pending
+        UserSetsApprovalMode(operator, conversation, mode)
+
+    related:
+        for response in conversation.assistant_responses where not all_calls_resolved:
+            ToolCallBatchReview(response)
+}
+
+surface ToolCallBatchReview {
+    facing operator: Operator
+
+    context response: AssistantResponse where not all_calls_resolved
+
+    exposes:
+        response.batch_approval_mode
+        response.next_pending_call
+        for call in response.tool_calls:
+            call.tool_config.name
+            call.arguments
+            call.command
+            call.status
+
+    provides:
+        UserApprovesToolCall(operator, response.next_pending_call)
+            when response.batch_approval_mode = manual and exists response.next_pending_call
+        UserRejectsToolCall(operator, response.next_pending_call)
+            when response.batch_approval_mode = manual and exists response.next_pending_call
+        UserInterruptsAutoRun(operator, response)
+            when response.batch_approval_mode = auto_run and exists response.next_pending_call
+
+    @guarantee OneUnresolvedBatchPerConversation
+        -- At most one AssistantResponse per Conversation is unresolved at
+        -- any moment; convocli does not request a new completion until
+        -- the previous batch's calls are all executed, rejected or
+        -- interrupted.
+}
+
