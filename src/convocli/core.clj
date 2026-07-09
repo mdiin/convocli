@@ -33,10 +33,13 @@
 
 ;; llm-endpoint/llm-model are mandatory per convocli.allium's config block
 ;; (no default there) - fail loudly at startup rather than silently
-;; running against an endpoint/model nobody chose.
-(doseq [k [:llm-endpoint :llm-model]]
-  (when (nil? (get config k))
-    (throw (ex-info (str "config.edn must set " k) {:missing-key k}))))
+;; running against an endpoint/model nobody chose. Called from -main
+;; rather than at namespace load time, so requiring this namespace (e.g.
+;; from the test suite) doesn't itself require a config.edn to exist.
+(defn validate-config! []
+  (doseq [k [:llm-endpoint :llm-model]]
+    (when (nil? (get config k))
+      (throw (ex-info (str "config.edn must set " k) {:missing-key k})))))
 
 ;; advertised_context_window is a black box in the spec. llama.cpp/vLLM-
 ;; style servers expose the model's real n_ctx via GET /v1/models, so this
@@ -729,6 +732,7 @@
    :width (:terminal-width state)))
 
 (defn -main [& _args]
+  (validate-config!)
   (program/run {:init init
                 :update #'update-fn
                 :view #'view-2
