@@ -89,11 +89,24 @@
   (sci/init {:namespaces {'user {'json-parse #(json/parse-string % true)
                                  'json-encode json/encode}}}))
 
+;; sci/eval-string* evaluates in whatever namespace *ns* (the host
+;; Clojure/babashka dynamic var, not something sci-internal) currently
+;; names - it does NOT default to 'user regardless of context. Under
+;; `bb -e`/`bb -m` that happens to be 'user, so this worked in every
+;; isolated test; under `bb run`/bb tasks, babashka rebinds *ns* per
+;; invocation to a freshly generated `user-<uuid>` namespace, so the
+;; bindings above (placed under the namespace literally named 'user)
+;; were never actually visible - producing "Unable to resolve symbol:
+;; json-parse" on every real run despite passing every isolated test.
+;; Force the namespace explicitly rather than depend on ambient *ns*.
+(def mapper-eval-ns (create-ns 'user))
+
 (defn apply-mapper
   "Evaluates tool-config's mapper source and applies it to the raw
   arguments JSON string, returning the shell command it produces."
   [tool-config arguments-json]
-  (let [mapper-fn (sci/eval-string* mapper-sci-ctx (:mapper-source tool-config))]
+  (let [mapper-fn (binding [*ns* mapper-eval-ns]
+                    (sci/eval-string* mapper-sci-ctx (:mapper-source tool-config)))]
     (mapper-fn arguments-json)))
 
 ;; ---------------------------------------------------------------------------
