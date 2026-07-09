@@ -19,6 +19,25 @@
 (declare sync-viewport-content)
 
 ;; ---------------------------------------------------------------------------
+;; Config file lookup: .convocli/<filename> under the current directory
+;; takes precedence, falling back to <XDG config dir>/convocli/<filename>
+;; so config.edn/tools.edn can live either alongside a project or once
+;; per-user.
+;; ---------------------------------------------------------------------------
+
+(defn- xdg-config-home []
+  (or (System/getenv "XDG_CONFIG_HOME")
+      (str (System/getProperty "user.home") "/.config")))
+
+(defn find-config-file [filename]
+  (let [local (io/file ".convocli" filename)
+        xdg (io/file (xdg-config-home) "convocli" filename)]
+    (cond
+      (.exists local) local
+      (.exists xdg) xdg
+      :else nil)))
+
+;; ---------------------------------------------------------------------------
 ;; Config (see convocli.allium's `config` block)
 ;; ---------------------------------------------------------------------------
 
@@ -29,8 +48,8 @@
 
 (def config
   (merge default-config
-         (when (.exists (io/file "config.edn"))
-           (edn/read-string (slurp "config.edn")))))
+         (when-let [f (find-config-file "config.edn")]
+           (edn/read-string (slurp f)))))
 
 ;; llm-endpoint/llm-model are mandatory per convocli.allium's config block
 ;; (no default there) - fail loudly at startup rather than silently
@@ -71,7 +90,10 @@
 ;; command string.
 ;; ---------------------------------------------------------------------------
 
-(def tool-configs (edn/read-string (slurp "tools.edn")))
+(def tool-configs
+  (if-let [f (find-config-file "tools.edn")]
+    (edn/read-string (slurp f))
+    (throw (ex-info "tools.edn not found in .convocli/ or the XDG config directory" {}))))
 
 (def tool-configs-by-name (into {} (map (juxt :name identity) tool-configs)))
 

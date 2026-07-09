@@ -60,7 +60,7 @@
 
 (defn -main [& [manifest-path out-path]]
   (let [manifest-path (or manifest-path "../thecli/manifest.json")
-        out-path (or out-path "tools.edn")
+        out-path (or out-path ".convocli/tools.edn")
         manifest (json/parse-string (slurp manifest-path) true)
         tool-configs (manifest->tool-configs manifest)]
     (spit out-path (with-out-str (clojure.pprint/pprint tool-configs)))
