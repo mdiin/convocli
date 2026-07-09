@@ -67,6 +67,16 @@ entity ToolConfig {
     description: String
     parameters_schema: String    -- OpenAI tool-schema JSON Schema for arguments, opaque here
     mapper_source: String        -- user-authored SCI/Clojure source: arguments -> shell command
+
+    -- @guidance
+    --     mapper_source produces a string that later runs through a
+    --     shell (see run_command), so any argument value it embeds -
+    --     all of which ultimately trace back to LLM output - must be
+    --     shell-escaped, not just interpolated. An unescaped value
+    --     containing shell metacharacters is a command-injection path,
+    --     not just a malformed command. Implementations should expose a
+    --     safe quoting primitive to mapper authors rather than expect
+    --     each one to hand-roll escaping correctly.
 }
 
 entity Conversation {

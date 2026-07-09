@@ -29,9 +29,8 @@
    "    (str \"" cli-prefix "\"\n"
    "         (apply str\n"
    "                (map (fn [[k v]]\n"
-   "                       (str \" --\" (name k) \" \\\"\"\n"
-   "                            (if (string? v) v (json-encode v))\n"
-   "                            \"\\\"\"))\n"
+   "                       (str \" --\" (name k) \" \"\n"
+   "                            (shell-quote (if (string? v) v (json-encode v)))))\n"
    "                     args)))))"))
 
 (defn command->tool-config [group-name cmd-name cmd-def]

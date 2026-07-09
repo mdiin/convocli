@@ -78,16 +78,31 @@
 
 (def tools (mapv tool-config->openai-tool tool-configs))
 
-;; Mapper source only ever sees json-parse/json-encode - no filesystem,
-;; network or process access - so a broken or malicious mapper can produce
-;; a bad command string but can't do anything else.
+(defn shell-quote
+  "Wraps a value in single quotes, escaping any embedded single quote as
+  '\\'' - the standard POSIX-safe way to make a value immune to shell
+  interpretation regardless of its content (spaces, quotes, $, ;, `, etc).
+  The mapper's job is to produce a shell command string that later gets
+  run via `bash -c`; every value embedded in it that could contain
+  arbitrary text (any LLM-supplied argument) must go through this."
+  [v]
+  (str "'" (str/replace (str v) "'" "'\\''") "'"))
+
+;; Mapper source can call json-parse/json-encode/shell-quote - no direct
+;; filesystem/network/process access from within the sandbox itself, but
+;; its OUTPUT is a shell command string that DOES get executed with full
+;; shell access (see execute-tool-call-cmd), so an unescaped value in
+;; that string is a real command-injection risk, not just a "bad string"
+;; - shell-quote exists specifically so mapper authors don't have to
+;; hand-roll escaping to stay safe.
 ;; :bindings is deprecated (sci.core/eval-string's docstring: ":bindings x
 ;; is the same as :namespaces {'user x}"); using the explicit replacement
 ;; directly rather than relying on deprecated behaviour that may vary
 ;; across sci/babashka versions.
 (def mapper-sci-ctx
   (sci/init {:namespaces {'user {'json-parse #(json/parse-string % true)
-                                 'json-encode json/encode}}}))
+                                 'json-encode json/encode
+                                 'shell-quote shell-quote}}}))
 
 ;; sci/eval-string* evaluates in whatever namespace *ns* (the host
 ;; Clojure/babashka dynamic var, not something sci-internal) currently
