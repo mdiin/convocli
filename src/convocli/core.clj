@@ -460,6 +460,32 @@
 (defn toggle-approval-mode [state]
   [(update state :approval-mode #(if (= % :manual) :auto-run :manual)) nil])
 
+(defn remap-shadowed-word-edit-key
+  "charm.components.text-input's key-match? ignores modifiers for plain
+  (no '+') binding strings, and its cond checks single-character actions
+  (bound to plain \"left\"/\"right\"/\"backspace\"/\"delete\") before the
+  word-level ones that share those base keys - so alt+left, ctrl+left,
+  alt+right, ctrl+right, alt+backspace and alt+delete never fire; they
+  silently act as single-character moves/deletes instead. The library's
+  own emacs-style bindings (alt+b/f/d, ctrl+w) don't share a base key
+  with anything earlier in that cond, so they work correctly. Translate
+  the dead combos to the working ones rather than patch the dependency."
+  [msg]
+  (cond
+    (or (msg/key-match? msg "ctrl+left") (msg/key-match? msg "alt+left"))
+    (msg/key-press "b" :alt true)
+
+    (or (msg/key-match? msg "ctrl+right") (msg/key-match? msg "alt+right"))
+    (msg/key-press "f" :alt true)
+
+    (msg/key-match? msg "alt+backspace")
+    (msg/key-press "w" :ctrl true)
+
+    (msg/key-match? msg "alt+delete")
+    (msg/key-press "d" :alt true)
+
+    :else msg))
+
 (defn update-fn* [state msg]
   (cond
     (msg/window-size? msg)
@@ -502,8 +528,9 @@
 
     :else
     (let [field (:current state)
-          [input cmd] (text-input/text-input-update (get state field) msg)
-          [vp vp-cmd] (viewport/viewport-update (get state :viewport) msg)]
+          msg' (remap-shadowed-word-edit-key msg)
+          [input cmd] (text-input/text-input-update (get state field) msg')
+          [vp vp-cmd] (viewport/viewport-update (get state :viewport) msg')]
       [(-> state
            (assoc field input)
            (assoc :viewport vp))
