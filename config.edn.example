@@ -2,4 +2,5 @@
  :llm-model "your-model-id-or-alias"
  ;; :context-window-override 8192
  ;; :max-auto-iterations 10
+ ;; :system-prompt "You are driving a CLI tool. Whenever you have enough information to invoke a tool, do so."
  }

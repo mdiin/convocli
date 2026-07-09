@@ -24,7 +24,8 @@
 
 (def default-config
   {:context-window-override nil
-   :max-auto-iterations 10})
+   :max-auto-iterations 10
+   :system-prompt "You know Event Modeling (Adam Dymitruk). Your goal is to command the Event Modeling CLI. Whenever you have enough knowledge to invoke a tool, do so."})
 
 (def config
   (merge default-config
@@ -222,9 +223,6 @@
 ;; Building the OpenAI-compatible request from conversation-log
 ;; ---------------------------------------------------------------------------
 
-(def system-prompt
-  "You know Event Modeling (Adam Dymitruk). Your goal is to command the Event Modeling CLI. Whenever you have enough knowledge to invoke a tool, do so.")
-
 (defn tool-result-content
   [tool-call]
   (case (:status tool-call)
@@ -276,7 +274,7 @@
                                    :body (json/encode
                                           {:model (:llm-model config)
                                            :tools tools
-                                           :messages (into [{:role "system" :content system-prompt}]
+                                           :messages (into [{:role "system" :content (:system-prompt config)}]
                                                             (conversation->openai-messages conversation-log))})})
              body (json/parse-string (:body response) true)
              choice (:message (first (:choices body)))]
@@ -532,10 +530,10 @@
 (defn update-fn* [state msg]
   (cond
     (msg/window-size? msg)
-    [(assoc state
-            :terminal-width (:width msg)
-            :terminal-height (:height msg)
-            :viewport (viewport/viewport-set-dimensions (:viewport state) (- (:width msg) 4) (- (:height msg) 12)))
+    ;; Actual dimension-setting happens uniformly in sync-viewport-content
+    ;; (called from the update-fn wrapper after every message, not just
+    ;; resize), since input growth must also resize the viewport.
+    [(assoc state :terminal-width (:width msg) :terminal-height (:height msg))
      nil]
 
     (msg/key-match? msg "ctrl+c")
@@ -657,28 +655,53 @@
   (let [lines (mapcat message-lines (visible-messages conversation-log))]
     (str/join "\n" (mapcat #(wrap-text % width) lines))))
 
-(defn sync-viewport-content
-  "Keeps the viewport's persisted content in sync with conversation-log/
-  terminal-width, scrolling to the newest message when either changes.
-  Must be called whenever state changes, never from a pure render fn -
-  viewport-set-content resets scroll, so calling it on every render
-  (rather than only when content actually changed) would make manual
-  scrolling impossible.
+(defn page-width
+  "The inner content width shared by every pane (header/content/footer) -
+  see render-page. Duplicated here (rather than threaded as a parameter)
+  because both rendering and viewport/footer sizing need the identical
+  value to avoid overflowing or under-using the bordered box."
+  [terminal-width]
+  (max 60 (- (or terminal-width 120) 4)))
 
-  force? bypasses the no-op-if-unchanged check: needed right after the
-  viewport's height becomes known (the initial window-size message),
-  since short lines often wrap identically at any width, so the
-  unchanged-text check alone would never notice that scroll-to-bottom
+(defn footer-lines
+  "The input line, wrapped to the page width so it grows in height to
+  fit longer input instead of running off-screen. Needed both for
+  rendering (render-footer) and for budgeting how much height remains
+  for the history viewport (see sync-viewport-content) - both must
+  agree on the same line count, or the footer box and the space
+  reserved for it drift apart."
+  [{:keys [approval-mode llm-query terminal-width]}]
+  (wrap-text (str "[" (name approval-mode) ", ctrl+t to toggle] " (text-input/text-input-view llm-query))
+             (page-width terminal-width)))
+
+(defn sync-viewport-content
+  "Keeps the viewport's dimensions and persisted content in sync with
+  conversation-log/terminal size/input length, scrolling to the newest
+  message when content changes. Must be called whenever state changes,
+  never from a pure render fn - viewport-set-content resets scroll, so
+  calling it on every render (rather than only when content actually
+  changed) would make manual scrolling impossible. Dimensions are
+  updated unconditionally on every call (not just on resize), since a
+  growing multi-line input must shrink the viewport in real time to
+  keep the total layout within the terminal's real height;
+  viewport-set-dimensions only clamps the scroll offset, never resets
+  it, so this part is always safe to repeat.
+
+  force? bypasses the content no-op-if-unchanged check: needed right
+  after the viewport's height becomes known (the initial window-size
+  message), since short lines often wrap identically at any width, so
+  the unchanged-text check alone would never notice that scroll-to-bottom
   now has a real height to compute against instead of the 0 it started
   with."
   ([state] (sync-viewport-content state false))
   ([state force?]
-   (let [vp-width (:width (:viewport state))
-         ;; Not yet sized (before the first window-size message): wrap
-         ;; generously rather than at 0, which would break every word
-         ;; onto its own line. Gets rewrapped correctly moments later
-         ;; when the real width arrives (see force? above).
-         width (if (pos? vp-width) vp-width 200)
+   (let [width (page-width (:terminal-width state))
+         ;; See render-page: header (3 rows) + content borders (2) +
+         ;; footer borders (2) + 4 rows of slack = 11, plus however many
+         ;; rows the footer itself now takes (1 when the input is short,
+         ;; matching the original fixed budget exactly).
+         height (max 1 (- (or (:terminal-height state) 80) 11 (count (footer-lines state))))
+         state (update state :viewport #(viewport/viewport-set-dimensions % width height))
          text (conversation-display-text (:conversation-log state) width)]
      (if (and (not force?) (= text (viewport/viewport-content (:viewport state))))
        state
@@ -716,13 +739,12 @@
      (str (viewport/viewport-view viewport)
           (when status (str "\n\n" status))))))
 
-(defn render-footer
-  [{:keys [approval-mode llm-query]}]
-  (str "[" (name approval-mode) ", ctrl+t to toggle] " (text-input/text-input-view llm-query)))
+(defn render-footer [state]
+  (str/join "\n" (footer-lines state)))
 
 (defn render-page
   [header content footer & {:keys [width]}]
-  (let [w (max 60 (- width 4))]
+  (let [w (page-width width)]
     (style/join-vertical
      :left
      (style/render (style/style :width w :align :center :border border/normal) header)

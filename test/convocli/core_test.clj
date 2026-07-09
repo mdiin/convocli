@@ -13,6 +13,7 @@
    [charm.message :as msg]
    [charm.ansi.width :as ansi]
    [charm.components.viewport :as viewport]
+   [charm.components.text-input :as text-input]
    [babashka.process :as process]
    [convocli.core :as c]))
 
@@ -399,34 +400,65 @@
 ;; Viewport content sync (see the "scrolling never worked" fix)
 ;; ---------------------------------------------------------------------------
 
+(def footer-test-fixture
+  {:approval-mode :manual
+   :llm-query (text-input/text-input :prompt ":> ")})
+
+(defn fresh-viewport []
+  (first (viewport/viewport-init (viewport/viewport "" :keys c/viewport-scroll-keys))))
+
 (deftest sync-viewport-content-test
-  (testing "populates the viewport's persisted content, not just a locally-discarded copy"
-    (let [[vp _] (viewport/viewport-init (viewport/viewport "" :keys c/viewport-scroll-keys))
-          vp (viewport/viewport-set-dimensions vp 100 10)
-          log [{:type :user-prompt :created-at 1 :text "hello"}]
-          state (c/sync-viewport-content {:conversation-log log :terminal-width 100 :viewport vp})]
-      (is (pos? (viewport/viewport-line-count (:viewport state))))))
+  (testing "populates the viewport's persisted content and real dimensions, not just a locally-discarded copy"
+    (let [log [{:type :user-prompt :created-at 1 :text "hello"}]
+          state (c/sync-viewport-content (merge footer-test-fixture
+                                                 {:conversation-log log :terminal-width 100
+                                                  :terminal-height 20 :viewport (fresh-viewport)}))]
+      (is (pos? (viewport/viewport-line-count (:viewport state))))
+      (is (pos? (:height (:viewport state))) "dimensions must come from terminal size, not stay at 0")))
 
   (testing "no-op (content unchanged) unless force?"
-    (let [[vp _] (viewport/viewport-init (viewport/viewport "" :keys c/viewport-scroll-keys))
-          vp (viewport/viewport-set-dimensions vp 100 10)
-          log [{:type :user-prompt :created-at 1 :text "hello"}]
-          state0 {:conversation-log log :terminal-width 100 :viewport vp}
+    (let [log (mapv (fn [i] {:type :user-prompt :created-at i :text (str "line " i)}) (range 50))
+          state0 (merge footer-test-fixture {:conversation-log log :terminal-width 100
+                                              :terminal-height 20 :viewport (fresh-viewport)})
           state1 (c/sync-viewport-content state0)
           scrolled (update state1 :viewport viewport/scroll-up)
           state2 (c/sync-viewport-content scrolled)]
       (is (= (:y-offset (:viewport scrolled)) (:y-offset (:viewport state2)))
           "unchanged content must not reset a manual scroll position")))
 
-  (testing "force? bypasses the no-op check, scrolling to the bottom"
-    (let [[vp _] (viewport/viewport-init (viewport/viewport "" :keys c/viewport-scroll-keys))
-          log (mapv (fn [i] {:type :user-prompt :created-at i :text (str "line " i)}) (range 50))
-          state0 {:conversation-log log :terminal-width 100 :viewport vp}
+  (testing "force? bypasses the no-op check, re-scrolling to the bottom despite unchanged content"
+    (let [log (mapv (fn [i] {:type :user-prompt :created-at i :text (str "line " i)}) (range 50))
+          state0 (merge footer-test-fixture {:conversation-log log :terminal-width 100
+                                              :terminal-height 20 :viewport (fresh-viewport)})
           state1 (c/sync-viewport-content state0)
-          resized (update state1 :viewport #(viewport/viewport-set-dimensions % 100 10))
-          state2 (c/sync-viewport-content resized true)]
-      (is (pos? (:y-offset (:viewport state2)))
-          "once a real height is known, force? must recompute scroll-to-bottom"))))
+          scrolled (update state1 :viewport viewport/scroll-up)
+          state2 (c/sync-viewport-content scrolled true)]
+      (is (> (:y-offset (:viewport state2)) (:y-offset (:viewport scrolled)))
+          "force? must re-scroll to the bottom even though the text itself didn't change"))))
+
+;; ---------------------------------------------------------------------------
+;; Growing input (footer-lines / page-width) - see sync-viewport-content
+;; ---------------------------------------------------------------------------
+
+(deftest growing-input-test
+  (testing "short input is one footer line; the viewport gets the full budgeted height"
+    (let [state (c/sync-viewport-content (merge footer-test-fixture
+                                                 {:conversation-log [] :terminal-width 60
+                                                  :terminal-height 20 :viewport (fresh-viewport)}))]
+      (is (= 1 (count (c/footer-lines state))))
+      (is (= 8 (:height (:viewport state))))))
+
+  (testing "long input grows the footer and shrinks the viewport by exactly as much,
+            keeping the total layout within the same terminal height"
+    (let [long-input (text-input/set-value (text-input/text-input :prompt ":> ")
+                                            (str/join " " (repeat 30 "word")))
+          state (c/sync-viewport-content (merge footer-test-fixture
+                                                 {:llm-query long-input
+                                                  :conversation-log [] :terminal-width 60
+                                                  :terminal-height 20 :viewport (fresh-viewport)}))
+          footer-count (count (c/footer-lines state))]
+      (is (> footer-count 1))
+      (is (= (- 20 11 footer-count) (:height (:viewport state)))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Word-edit key shadowing workaround

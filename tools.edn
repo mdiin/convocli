@@ -1,4 +1,13 @@
-[{:name "show",
+[{:name "read_file"
+  :description "Read a file from the file system"
+  :parameters-schema {:type "object"
+                      :properties {"path" {:type "string"
+                                           :description "path to file"}}
+                      :required ["path"]}
+  :mapper-source (fn [args-json]
+                   (let [{:keys [path]} (json-parse args-json)]
+                     (str "/usr/bin/cat " (shell-quote path))))}
+ {:name "show",
   :description
   "Runs `show` on the Event Modeling CLI to get the full model with IDs of all elements",
   :mapper-source (fn [_] "emcli show")}

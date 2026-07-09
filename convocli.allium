@@ -231,6 +231,8 @@ config {
     llm_model: String
     context_window_override: Integer?       -- overrides the model-advertised context window (in tokens) when set
     max_auto_iterations: Integer = 10       -- cap on consecutive auto_run round-trips per turn
+    system_prompt: String = "You know Event Modeling (Adam Dymitruk). Your goal is to command the Event Modeling CLI. Whenever you have enough knowledge to invoke a tool, do so."
+        -- guides how the LLM uses the loaded ToolConfigs; deployment-specific
 }
 
 ------------------------------------------------------------
