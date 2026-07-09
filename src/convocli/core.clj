@@ -54,14 +54,8 @@
 ;; Config (see convocli.allium's `config` block)
 ;; ---------------------------------------------------------------------------
 
-(def default-config
-  {:context-window-override nil
-   :max-auto-iterations 10
-   :system-prompt "You know Event Modeling (Adam Dymitruk). Your goal is to command the Event Modeling CLI. Whenever you have enough knowledge to invoke a tool, do so."})
-
 (def config
-  (merge default-config
-         (edn/read-string (slurp (ensure-config-file! "config.edn" "config.edn.example")))))
+  (edn/read-string (slurp (ensure-config-file! "config.edn" "config.edn.example"))))
 
 ;; llm-endpoint/llm-model are mandatory per convocli.allium's config block
 ;; (no default there) - fail loudly at startup rather than silently

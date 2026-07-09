@@ -1,6 +1,5 @@
 {:llm-endpoint "http://localhost:9090/v1/chat/completions"
  :llm-model "your-model-id-or-alias"
- ;; :context-window-override 8192
- ;; :max-auto-iterations 10
- ;; :system-prompt "You are driving a CLI tool. Whenever you have enough information to invoke a tool, do so."
- }
+ :context-window-override nil
+ :max-auto-iterations 10
+ :system-prompt "You know Event Modeling (Adam Dymitruk). Your goal is to command the Event Modeling CLI. Whenever you have enough knowledge to invoke a tool, do so."}
