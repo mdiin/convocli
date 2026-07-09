@@ -346,9 +346,21 @@
 
 (def my-input (text-input/text-input :prompt ":> " :placeholder ""))
 
+;; The message-history viewport and the always-focused text-input receive
+;; every key unconditionally (see update-fn*'s :else branch), so their
+;; bindings must not collide. viewport's defaults (j/k/g/G, home/end,
+;; ctrl+u/ctrl+d) collide with plain typing and with text-input's own
+;; word/line-editing bindings; keep only the arrow/page keys, which
+;; text-input never uses.
+(def viewport-scroll-keys
+  {:line-up ["up"] :line-down ["down"]
+   :page-up ["pgup"] :page-down ["pgdown"]
+   :half-page-up [] :half-page-down []
+   :top [] :bottom []})
+
 (defn init []
   (let [[s s-cmd] (spinner/spinner-init (spinner/spinner :dots))
-        [vp vp-cmd] (viewport/viewport-init (viewport/viewport ""))
+        [vp vp-cmd] (viewport/viewport-init (viewport/viewport "" :keys viewport-scroll-keys))
         {:keys [conversation-log approval-mode]} (load-conversation)]
     [{:llm-query my-input
       :spinner s
