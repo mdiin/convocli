@@ -1,0 +1,80 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            asset: linux-amd64
+          - os: macos-latest
+            asset: macos-arm64
+          - os: windows-latest
+            asset: windows-amd64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: DeLaGuardo/setup-clojure@13.4
+        with:
+          bb: "1.12.218"
+
+      - name: Build uberjar
+        run: bb uberjar convocli.jar -m convocli.core
+
+      - name: Package (unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          dist="convocli-${version}-${{ matrix.asset }}"
+          mkdir "$dist"
+          cp "$(command -v bb)" "$dist/bb"
+          cp convocli.jar "$dist/"
+          cat > "$dist/convocli" <<'EOF'
+          #!/usr/bin/env bash
+          dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+          exec "$dir/bb" "$dir/convocli.jar" "$@"
+          EOF
+          chmod +x "$dist/convocli" "$dist/bb"
+          tar -czf "${dist}.tar.gz" "$dist"
+
+      - name: Package (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $version = "${env:GITHUB_REF_NAME}".TrimStart("v")
+          $dist = "convocli-$version-${{ matrix.asset }}"
+          New-Item -ItemType Directory -Path $dist | Out-Null
+          Copy-Item (Get-Command bb).Source "$dist/bb.exe"
+          Copy-Item convocli.jar "$dist/"
+          Set-Content -Path "$dist/convocli.bat" -Value "@echo off`r`n`"%~dp0bb.exe`" `"%~dp0convocli.jar`" %*"
+          Compress-Archive -Path $dist -DestinationPath "$dist.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: |
+            convocli-*.tar.gz
+            convocli-*.zip
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
