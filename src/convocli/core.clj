@@ -569,16 +569,33 @@
   [text max-width]
   (mapcat #(wrap-single-line % max-width) (str/split text #"\n")))
 
+(defn tool-call-line
+  "One display entry per ToolCall: always shows tool_name and the actual
+  command (see convocli.allium's ToolCall - both are present regardless
+  of outcome, except command when unknown-tool/mapper-failure never
+  produced one). Executed calls also show exit code and stdout/stderr,
+  since exit code alone gives no indication of what the command did."
+  [c]
+  (let [header (str ">=> " (:tool-name c) " [" (name (:status c)) "]")]
+    (cond
+      (and (= :executed (:status c)) (nil? (:command c)))
+      (str header " " (:stderr c))
+
+      (= :executed (:status c))
+      (str header " " (:command c) " (exit " (:exit-code c) ")"
+           (when (seq (:stdout c)) (str "\n" (:stdout c)))
+           (when (seq (:stderr c)) (str "\nSTDERR: " (:stderr c))))
+
+      :else
+      (str header " " (:command c)))))
+
 (defn message-lines
   [{:keys [type] :as m}]
   (case type
     :user-prompt [(str "<O_O> => " (:text m))]
     :assistant-response
     (into (if (seq (:text m)) [(str "[*_*] => " (:text m))] [])
-          (map (fn [c] (str ">=> " (:tool-name c) " [" (name (:status c)) "] " (:command c)
-                             (when (= :executed (:status c))
-                               (str " (exit " (:exit-code c) ")"))))
-               (:tool-calls m)))
+          (map tool-call-line (:tool-calls m)))
     :llm-error [(str "[!!!] LLM error: " (:error m))]
     :auto-cap-reached [(str "[...] auto-run stopped: hit the " (:iterations-run m) "-iteration cap")]
     :auto-run-interrupted [(str "[...] auto-run interrupted (" (:calls-skipped m) " call(s) skipped)")]
