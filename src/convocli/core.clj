@@ -81,9 +81,13 @@
 ;; Mapper source only ever sees json-parse/json-encode - no filesystem,
 ;; network or process access - so a broken or malicious mapper can produce
 ;; a bad command string but can't do anything else.
+;; :bindings is deprecated (sci.core/eval-string's docstring: ":bindings x
+;; is the same as :namespaces {'user x}"); using the explicit replacement
+;; directly rather than relying on deprecated behaviour that may vary
+;; across sci/babashka versions.
 (def mapper-sci-ctx
-  (sci/init {:bindings {'json-parse #(json/parse-string % true)
-                         'json-encode json/encode}}))
+  (sci/init {:namespaces {'user {'json-parse #(json/parse-string % true)
+                                 'json-encode json/encode}}}))
 
 (defn apply-mapper
   "Evaluates tool-config's mapper source and applies it to the raw
