@@ -166,7 +166,7 @@
 ;; the input forever after a crash/restart.
 ;; ---------------------------------------------------------------------------
 
-(def conversation-file "conversation.edn")
+(def conversation-file (io/file ".convocli" "conversation.edn"))
 
 (defn recover-stuck-approvals
   "approved is transient (execution follows immediately); finding one on
@@ -188,6 +188,7 @@
     {:conversation-log [] :approval-mode :manual}))
 
 (defn save-conversation! [state]
+  (io/make-parents conversation-file)
   (spit conversation-file
         (pr-str (select-keys state [:conversation-log :approval-mode])))
   state)
