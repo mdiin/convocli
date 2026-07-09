@@ -37,6 +37,19 @@
       (.exists xdg) xdg
       :else nil)))
 
+;; If neither location has the file, seed one under ./.convocli/ (the
+;; directory convocli was invoked from) from the copy bundled on the
+;; classpath, so a first run has something to edit instead of a crash.
+(defn- install-default-file! [filename resource-name]
+  (let [dest (io/file ".convocli" filename)]
+    (io/make-parents dest)
+    (io/copy (io/reader (io/resource resource-name)) dest)
+    dest))
+
+(defn ensure-config-file! [filename resource-name]
+  (or (find-config-file filename)
+      (install-default-file! filename resource-name)))
+
 ;; ---------------------------------------------------------------------------
 ;; Config (see convocli.allium's `config` block)
 ;; ---------------------------------------------------------------------------
@@ -48,14 +61,13 @@
 
 (def config
   (merge default-config
-         (when-let [f (find-config-file "config.edn")]
-           (edn/read-string (slurp f)))))
+         (edn/read-string (slurp (ensure-config-file! "config.edn" "config.edn.example")))))
 
 ;; llm-endpoint/llm-model are mandatory per convocli.allium's config block
 ;; (no default there) - fail loudly at startup rather than silently
-;; running against an endpoint/model nobody chose. Called from -main
-;; rather than at namespace load time, so requiring this namespace (e.g.
-;; from the test suite) doesn't itself require a config.edn to exist.
+;; running against an endpoint/model nobody chose. The auto-installed
+;; default config.edn (see ensure-config-file! above) already sets both,
+;; so this only fires if a user-edited config.edn drops one of them.
 (defn validate-config! []
   (doseq [k [:llm-endpoint :llm-model]]
     (when (nil? (get config k))
@@ -91,9 +103,7 @@
 ;; ---------------------------------------------------------------------------
 
 (def tool-configs
-  (if-let [f (find-config-file "tools.edn")]
-    (edn/read-string (slurp f))
-    (throw (ex-info "tools.edn not found in .convocli/ or the XDG config directory" {}))))
+  (edn/read-string (slurp (ensure-config-file! "tools.edn" "tools.edn"))))
 
 (def tool-configs-by-name (into {} (map (juxt :name identity) tool-configs)))
 

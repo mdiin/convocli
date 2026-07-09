@@ -1,4 +1,4 @@
-{:paths ["src" "test"]
+{:paths ["src" "test" ".convocli"]
  :deps {io.github.TimoKramer/charm.clj {:git/tag "v0.2.71" :git/sha "38e6823dc85ec932eefe2ad9c1f204307674c24f"}}
  :bbin/bin {convocli {:main-opts ["-m" "convocli.core"]}}
  :tasks
