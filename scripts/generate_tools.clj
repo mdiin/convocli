@@ -22,16 +22,22 @@
               :description desc}]
     (if values (assoc prop :enum values) prop)))
 
-(defn generic-mapper-source [cli-prefix]
-  (str
-   "(fn [args-json]\n"
-   "  (let [args (json-parse args-json)]\n"
-   "    (str \"" cli-prefix "\"\n"
-   "         (apply str\n"
-   "                (map (fn [[k v]]\n"
-   "                       (str \" --\" (name k) \" \"\n"
-   "                            (shell-quote (if (string? v) v (json-encode v)))))\n"
-   "                     args)))))"))
+(defn generic-mapper-source
+  "Returns the mapper as a real form (read via the plain reader, not
+  clojure.edn - this is our own trusted template, not external input),
+  not a string - tools.edn stores actual, directly-editable Clojure
+  code for mapper-source rather than one long escaped string."
+  [cli-prefix]
+  (read-string
+   (str
+    "(fn [args-json]\n"
+    "  (let [args (json-parse args-json)]\n"
+    "    (str \"" cli-prefix "\"\n"
+    "         (apply str\n"
+    "                (map (fn [[k v]]\n"
+    "                       (str \" --\" (name k) \" \"\n"
+    "                            (shell-quote (if (string? v) v (json-encode v)))))\n"
+    "                     args)))))")))
 
 (defn command->tool-config [group-name cmd-name cmd-def]
   (let [params (:params cmd-def)

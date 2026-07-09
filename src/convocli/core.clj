@@ -63,9 +63,11 @@
 
 ;; ---------------------------------------------------------------------------
 ;; ToolConfig loading (see convocli.allium): each entry supplies an
-;; OpenAI-style function tool definition plus a `mapper` - user-authored
-;; SCI/Clojure source, evaluated once, that turns the raw JSON arguments
-;; string the LLM supplied into a shell command string.
+;; OpenAI-style function tool definition plus a mapper - user-authored
+;; Clojure code, stored as a real form (not an escaped string) so it's
+;; directly editable in tools.edn, evaluated via sci once per call to
+;; turn the raw JSON arguments string the LLM supplied into a shell
+;; command string.
 ;; ---------------------------------------------------------------------------
 
 (def tool-configs (edn/read-string (slurp "tools.edn")))
@@ -107,12 +109,12 @@
                                  'json-encode json/encode
                                  'shell-quote shell-quote}}}))
 
-;; sci/eval-string* evaluates in whatever namespace *ns* (the host
-;; Clojure/babashka dynamic var, not something sci-internal) currently
-;; names - it does NOT default to 'user regardless of context. Under
-;; `bb -e`/`bb -m` that happens to be 'user, so this worked in every
-;; isolated test; under `bb run`/bb tasks, babashka rebinds *ns* per
-;; invocation to a freshly generated `user-<uuid>` namespace, so the
+;; sci/eval-form (like eval-string*) evaluates in whatever namespace *ns*
+;; (the host Clojure/babashka dynamic var, not something sci-internal)
+;; currently names - it does NOT default to 'user regardless of context.
+;; Under `bb -e`/`bb -m` that happens to be 'user, so this worked in
+;; every isolated test; under `bb run`/bb tasks, babashka rebinds *ns*
+;; per invocation to a freshly generated `user-<uuid>` namespace, so the
 ;; bindings above (placed under the namespace literally named 'user)
 ;; were never actually visible - producing "Unable to resolve symbol:
 ;; json-parse" on every real run despite passing every isolated test.
@@ -120,11 +122,14 @@
 (def mapper-eval-ns (create-ns 'user))
 
 (defn apply-mapper
-  "Evaluates tool-config's mapper source and applies it to the raw
-  arguments JSON string, returning the shell command it produces."
+  "Evaluates tool-config's mapper form and applies it to the raw
+  arguments JSON string, returning the shell command it produces.
+  mapper-source is a real EDN form (e.g. `(fn [args-json] ...)`), not a
+  string - tools.edn holds it as actual, directly-editable Clojure code
+  rather than one long escaped string."
   [tool-config arguments-json]
   (let [mapper-fn (binding [*ns* mapper-eval-ns]
-                    (sci/eval-string* mapper-sci-ctx (:mapper-source tool-config)))]
+                    (sci/eval-form mapper-sci-ctx (:mapper-source tool-config)))]
     (mapper-fn arguments-json)))
 
 ;; ---------------------------------------------------------------------------

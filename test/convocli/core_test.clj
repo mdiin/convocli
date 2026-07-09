@@ -156,13 +156,16 @@
   {:name "echo_tool"
    :description "test tool"
    :parameters-schema {:type "object" :properties {"msg" {:type "string"}}}
-   :mapper-source "(fn [args-json] (let [args (json-parse args-json)] (str \"echo \" (shell-quote (:msg args)))))"})
+   ;; mapper-source is a real form, not a string - see apply-mapper.
+   :mapper-source '(fn [args-json]
+                     (let [args (json-parse args-json)]
+                       (str "echo " (shell-quote (:msg args)))))})
 
 (def broken-tool-config
   {:name "broken_tool"
-   :description "test tool with invalid mapper source"
+   :description "test tool whose mapper fails at evaluation, not at read time"
    :parameters-schema {:type "object"}
-   :mapper-source "(this is not valid clojure"})
+   :mapper-source '(fn [args-json] (this-function-does-not-exist args-json))})
 
 (deftest apply-mapper-test
   (testing "resolves json-parse/json-encode/shell-quote regardless of ambient *ns*"
