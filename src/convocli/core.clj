@@ -99,9 +99,23 @@
 
 (def conversation-file "conversation.edn")
 
+(defn recover-stuck-approvals
+  "approved is transient (execution follows immediately); finding one on
+  load means convocli crashed between approval and the result arriving,
+  so the command's outcome is unknown. Reset to pending_approval rather
+  than leave it stuck forever with no recovery path - see convocli.allium's
+  ToolCall.status comment."
+  [log]
+  (mapv (fn [m]
+          (if (= :assistant-response (:type m))
+            (update m :tool-calls
+                    (fn [calls] (mapv (fn [c] (if (= :approved (:status c)) (assoc c :status :pending-approval) c)) calls)))
+            m))
+        log))
+
 (defn load-conversation []
   (if (.exists (io/file conversation-file))
-    (edn/read-string (slurp conversation-file))
+    (update (edn/read-string (slurp conversation-file)) :conversation-log recover-stuck-approvals)
     {:conversation-log [] :approval-mode :manual}))
 
 (defn save-conversation! [state]

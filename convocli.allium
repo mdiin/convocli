@@ -188,6 +188,14 @@ entity ToolCall {
     -- rejected/interrupted/executed are all terminal with no edit or retry
     -- path: the only way to try again is a fresh UserPrompt, which may
     -- lead the LLM to propose a new ToolCall with corrected arguments.
+    --
+    -- approved is transient: execution follows immediately. If convocli
+    -- is resumed and finds a ToolCall still at approved, the command's
+    -- outcome is unknown (a crash could have landed on either side of
+    -- running it). Implementations should reset it to pending_approval
+    -- on resume rather than leave it permanently stuck - has_unresolved_batch
+    -- would otherwise block all input forever with no recovery path, since
+    -- next_pending_call only ever matches pending_approval.
     status: pending_approval | approved | rejected | executed | interrupted
     stdout: String? when status = executed
     stderr: String? when status = executed
