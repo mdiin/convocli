@@ -1,2 +1,5 @@
 /.convocli/config.edn
 /.convocli/conversation.edn
+.claude/settings.local.json
+*~
+\#*\#
