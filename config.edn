@@ -1,2 +1,0 @@
-{:llm-endpoint "http://localhost:9090/v1/chat/completions"
- :llm-model "ministral-3-3b"}

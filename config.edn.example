@@ -1,0 +1,5 @@
+{:llm-endpoint "http://localhost:9090/v1/chat/completions"
+ :llm-model "your-model-id-or-alias"
+ ;; :context-window-override 8192
+ ;; :max-auto-iterations 10
+ }

@@ -31,6 +31,9 @@ external entity Operator {}
 ------------------------------------------------------------
 
 value ToolCallProposal {
+    id: String                -- LLM-assigned call identifier; must round-trip
+                               -- back to the LLM to correlate the result on
+                               -- the next completion request
     sequence: Integer          -- position in the order the LLM returned the calls
     tool_name: String         -- raw function name the LLM supplied
     tool_config: ToolConfig?  -- null if tool_name doesn't match any loaded ToolConfig
@@ -173,6 +176,9 @@ variant AutoRunInterrupted : Message {
 
 entity ToolCall {
     message: AssistantResponse
+    id: String                    -- LLM-assigned call identifier; must be sent
+                                   -- back with this call's result so the LLM
+                                   -- can correlate it on the next request
     tool_name: String             -- raw function name the LLM supplied
     tool_config: ToolConfig?      -- null if tool_name didn't match any loaded ToolConfig
     sequence: Integer             -- position within the batch; presented/approved in this order
@@ -259,6 +265,7 @@ rule RequestCompletion {
                 if not exists proposal.tool_config:
                     ToolCall.created(
                         message: response,
+                        id: proposal.id,
                         tool_name: proposal.tool_name,
                         tool_config: null,
                         sequence: proposal.sequence,
@@ -275,6 +282,7 @@ rule RequestCompletion {
                     if exists mapping.error:
                         ToolCall.created(
                             message: response,
+                            id: proposal.id,
                             tool_name: proposal.tool_name,
                             tool_config: proposal.tool_config,
                             sequence: proposal.sequence,
@@ -289,6 +297,7 @@ rule RequestCompletion {
                     else:
                         ToolCall.created(
                             message: response,
+                            id: proposal.id,
                             tool_name: proposal.tool_name,
                             tool_config: proposal.tool_config,
                             sequence: proposal.sequence,

@@ -36,18 +36,25 @@
   (when (nil? (get config k))
     (throw (ex-info (str "config.edn must set " k) {:missing-key k}))))
 
-;; advertised_context_window is a black box in the spec; there is no
-;; standard OpenAI-compatible endpoint for querying it, so this is a
-;; small heuristic table rather than a real lookup. Set
-;; :context-window-override in config.edn to bypass it entirely.
-(def known-context-windows
-  {"ministral-3-3b" 32768})
+;; advertised_context_window is a black box in the spec. llama.cpp/vLLM-
+;; style servers expose the model's real n_ctx via GET /v1/models, so this
+;; queries that instead of guessing. Falls back to 8192 if the endpoint
+;; doesn't support it. Fetched once at startup since :llm-model is fixed
+;; for the life of the process; set :context-window-override in
+;; config.edn to bypass this entirely.
+(defn fetch-advertised-context-window [endpoint model]
+  (try
+    (let [models-url (str/replace endpoint #"/chat/completions$" "/models")
+          body (json/parse-string (:body (http/get models-url)) true)
+          entry (first (filter #(= model (:id %)) (:data body)))]
+      (or (get-in entry [:meta :n_ctx]) 8192))
+    (catch Exception _ 8192)))
 
-(defn advertised-context-window [model]
-  (get known-context-windows model 8192))
+(def advertised-context-window-tokens
+  (delay (fetch-advertised-context-window (:llm-endpoint config) (:llm-model config))))
 
 (defn context-window-limit []
-  (or (:context-window-override config) (advertised-context-window (:llm-model config))))
+  (or (:context-window-override config) @advertised-context-window-tokens))
 
 ;; ---------------------------------------------------------------------------
 ;; ToolConfig loading (see convocli.allium): each entry supplies an
