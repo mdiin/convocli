@@ -539,16 +539,35 @@
            (assoc :viewport vp))
        (program/batch cmd vp-cmd)])))
 
-(defn wrap-text [text max-width]
-  (let [{:keys [lines current]}
-        (reduce (fn [{:keys [current lines] :as acc} word]
-                  (let [new-current (if (empty? current) word (str current " " word))]
-                    (if (> (ansi/string-width new-current) max-width)
-                      (assoc acc :current word :lines (conj lines current))
-                      (assoc acc :current new-current :lines lines))))
-                {:current "" :lines []}
-                (str/split text #" "))]
-    (conj lines current)))
+(defn- wrap-single-line
+  "Word-wraps text with no embedded newlines. Blank input stays blank
+  (preserves paragraph breaks - see wrap-text)."
+  [text max-width]
+  (if (str/blank? text)
+    [text]
+    (let [{:keys [lines current]}
+          (reduce (fn [{:keys [current lines] :as acc} word]
+                    (let [new-current (if (empty? current) word (str current " " word))]
+                      ;; Only break if there was already something on the
+                      ;; line - a lone word wider than max-width must still
+                      ;; go somewhere; breaking here would just insert an
+                      ;; empty line before it instead of after.
+                      (if (and (seq current) (> (ansi/string-width new-current) max-width))
+                        (assoc acc :current word :lines (conj lines current))
+                        (assoc acc :current new-current :lines lines))))
+                  {:current "" :lines []}
+                  (str/split text #" "))]
+      (conj lines current))))
+
+(defn wrap-text
+  "Word-wraps text to max-width, treating embedded newlines as hard
+  breaks. LLM output routinely contains markdown like \"**Heading**\\nBody
+  text\" with no space around the newline; wrapping the whole blob as one
+  space-delimited token stream (the previous behaviour) glued unrelated
+  lines into the same wrap unit and produced garbled, off-width breaks
+  with no relation to the actual paragraph structure."
+  [text max-width]
+  (mapcat #(wrap-single-line % max-width) (str/split text #"\n")))
 
 (defn message-lines
   [{:keys [type] :as m}]
@@ -570,10 +589,16 @@
   "Wrapped history text for the scrollable viewport. Pure; does not
   include the status line, which changes every tick (spinner) rather
   than when conversation-log changes, and must not reset viewport scroll
-  as a side effect of that."
-  [conversation-log terminal-width]
+  as a side effect of that.
+
+  width should be the viewport's own configured :width, not a guessed
+  offset from the raw terminal width - viewport-view pads/truncates each
+  line to that same width, so wrapping any narrower than it just wastes
+  space (every line gets padded back out) without fitting more text on
+  screen."
+  [conversation-log width]
   (let [lines (mapcat message-lines (visible-messages conversation-log))]
-    (str/join "\n" (mapcat #(wrap-text % (- terminal-width 10)) lines))))
+    (str/join "\n" (mapcat #(wrap-text % width) lines))))
 
 (defn sync-viewport-content
   "Keeps the viewport's persisted content in sync with conversation-log/
@@ -591,7 +616,13 @@
   with."
   ([state] (sync-viewport-content state false))
   ([state force?]
-   (let [text (conversation-display-text (:conversation-log state) (:terminal-width state))]
+   (let [vp-width (:width (:viewport state))
+         ;; Not yet sized (before the first window-size message): wrap
+         ;; generously rather than at 0, which would break every word
+         ;; onto its own line. Gets rewrapped correctly moments later
+         ;; when the real width arrives (see force? above).
+         width (if (pos? vp-width) vp-width 200)
+         text (conversation-display-text (:conversation-log state) width)]
      (if (and (not force?) (= text (viewport/viewport-content (:viewport state))))
        state
        (update state :viewport #(-> % (viewport/viewport-set-content text) viewport/scroll-to-bottom))))))
