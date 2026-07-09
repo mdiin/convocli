@@ -16,6 +16,8 @@
    [charm.components.viewport :as viewport]
    [babashka.http-client :as http]))
 
+(declare sync-viewport-content)
+
 ;; ---------------------------------------------------------------------------
 ;; Config (see convocli.allium's `config` block)
 ;; ---------------------------------------------------------------------------
@@ -361,17 +363,18 @@
 (defn init []
   (let [[s s-cmd] (spinner/spinner-init (spinner/spinner :dots))
         [vp vp-cmd] (viewport/viewport-init (viewport/viewport "" :keys viewport-scroll-keys))
-        {:keys [conversation-log approval-mode]} (load-conversation)]
-    [{:llm-query my-input
-      :spinner s
-      :viewport vp
-      :current :llm-query
-      :conversation-log conversation-log
-      :approval-mode (or approval-mode :manual)
-      :completion-pending? false
-      :terminal-width 120
-      :terminal-height 80}
-     (program/batch s-cmd vp-cmd)]))
+        {:keys [conversation-log approval-mode]} (load-conversation)
+        state (sync-viewport-content
+               {:llm-query my-input
+                :spinner s
+                :viewport vp
+                :current :llm-query
+                :conversation-log conversation-log
+                :approval-mode (or approval-mode :manual)
+                :completion-pending? false
+                :terminal-width 120
+                :terminal-height 80})]
+    [state (program/batch s-cmd vp-cmd)]))
 
 (defn submit-prompt [state]
   (let [text (str/trim (text-input/value (:llm-query state)))]
@@ -536,20 +539,6 @@
            (assoc :viewport vp))
        (program/batch cmd vp-cmd)])))
 
-(defn update-fn [state msg]
-  (let [[new-state cmd] (update-fn* state msg)]
-    (when (or (not= (:conversation-log state) (:conversation-log new-state))
-              (not= (:approval-mode state) (:approval-mode new-state)))
-      (save-conversation! new-state))
-    [new-state cmd]))
-
-;; ---------------------------------------------------------------------------
-;; Rendering
-;; ---------------------------------------------------------------------------
-
-(defn render-header []
-  "ConvoCLI")
-
 (defn wrap-text [text max-width]
   (let [{:keys [lines current]}
         (reduce (fn [{:keys [current lines] :as acc} word]
@@ -577,26 +566,67 @@
     :compaction-summary [(str "[compacted] " (:summary m))]
     []))
 
+(defn conversation-display-text
+  "Wrapped history text for the scrollable viewport. Pure; does not
+  include the status line, which changes every tick (spinner) rather
+  than when conversation-log changes, and must not reset viewport scroll
+  as a side effect of that."
+  [conversation-log terminal-width]
+  (let [lines (mapcat message-lines (visible-messages conversation-log))]
+    (str/join "\n" (mapcat #(wrap-text % (- terminal-width 10)) lines))))
+
+(defn sync-viewport-content
+  "Keeps the viewport's persisted content in sync with conversation-log/
+  terminal-width, scrolling to the newest message when either changes.
+  Must be called whenever state changes, never from a pure render fn -
+  viewport-set-content resets scroll, so calling it on every render
+  (rather than only when content actually changed) would make manual
+  scrolling impossible.
+
+  force? bypasses the no-op-if-unchanged check: needed right after the
+  viewport's height becomes known (the initial window-size message),
+  since short lines often wrap identically at any width, so the
+  unchanged-text check alone would never notice that scroll-to-bottom
+  now has a real height to compute against instead of the 0 it started
+  with."
+  ([state] (sync-viewport-content state false))
+  ([state force?]
+   (let [text (conversation-display-text (:conversation-log state) (:terminal-width state))]
+     (if (and (not force?) (= text (viewport/viewport-content (:viewport state))))
+       state
+       (update state :viewport #(-> % (viewport/viewport-set-content text) viewport/scroll-to-bottom))))))
+
+(defn update-fn [state msg]
+  (let [[new-state cmd] (update-fn* state msg)
+        resized? (not= (:terminal-height state) (:terminal-height new-state))
+        new-state (sync-viewport-content new-state resized?)]
+    (when (or (not= (:conversation-log state) (:conversation-log new-state))
+              (not= (:approval-mode state) (:approval-mode new-state)))
+      (save-conversation! new-state))
+    [new-state cmd]))
+
+;; ---------------------------------------------------------------------------
+;; Rendering
+;; ---------------------------------------------------------------------------
+
+(defn render-header []
+  "ConvoCLI")
+
 (defn render-content
-  [{:keys [conversation-log spinner viewport terminal-width] :as state}]
+  [{:keys [spinner viewport] :as state}]
   (let [mode (tui-mode state)
-        lines (mapcat message-lines (visible-messages conversation-log))
-        wrapped (mapcat #(wrap-text % (- terminal-width 10)) lines)
         status (case mode
                  :awaiting-completion (str "[-_o] => " (spinner/spinner-view spinner))
                  :reviewing-batch
-                 (let [response (latest-assistant-response conversation-log)]
+                 (let [response (latest-assistant-response (:conversation-log state))]
                    (if (= :manual (:batch-approval-mode response))
                      "[y] approve  [n] reject"
                      "auto-running... [i] interrupt"))
                  :composing nil)]
     (style/render
      (style/style)
-     (viewport/viewport-view
-      (viewport/viewport-set-content
-       viewport
-       (str (str/join "\n" wrapped)
-            (when status (str (when (seq wrapped) "\n\n") status))))))))
+     (str (viewport/viewport-view viewport)
+          (when status (str "\n\n" status))))))
 
 (defn render-footer
   [{:keys [approval-mode llm-query]}]
