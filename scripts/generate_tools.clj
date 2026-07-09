@@ -44,7 +44,7 @@
      :parameters-schema {:type "object"
                          :properties props
                          :required required}
-     :mapper-source (generic-mapper-source cli-prefix)}))
+     :mapper-source (generic-mapper-source (str "emcli " cli-prefix))}))
 
 (defn manifest->tool-configs [manifest]
   (vec (mapcat (fn [[group-name commands]]
