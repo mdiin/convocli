@@ -278,7 +278,7 @@
                     {:role "tool" :tool_call_id (:id tc) :content content}))
                 (:tool-calls m)))
 
-    :compaction-summary [{:role "system" :content (str "Earlier conversation summary: " (:summary m))}]
+    :compaction-summary [{:role "user" :content (str "Earlier conversation summary: " (:summary m))}]
 
     ;; llm-error / auto-cap-reached / auto-run-interrupted are client-side
     ;; bookkeeping only; the LLM never sees them directly.

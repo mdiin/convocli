@@ -339,13 +339,28 @@
           msgs (c/message->openai m)]
       (is (= 1 (count msgs)))))
 
-  (testing "compaction summary becomes a system message"
-    (is (= "system" (:role (first (c/message->openai {:type :compaction-summary :summary "..."}))))))
+  (testing "compaction summary becomes a user message (system is reserved for the leading prompt only)"
+    (is (= "user" (:role (first (c/message->openai {:type :compaction-summary :summary "..."}))))))
 
   (testing "bookkeeping-only messages contribute nothing to the LLM's view"
     (is (empty? (c/message->openai {:type :llm-error :error "boom"})))
     (is (empty? (c/message->openai {:type :auto-cap-reached :iterations-run 10})))
     (is (empty? (c/message->openai {:type :auto-run-interrupted :calls-skipped 1})))))
+
+(deftest compaction-end-to-end-wire-format-test
+  (testing "post-compaction wire messages never carry a second system role
+            (Ministral/Mistral-style templates reject 'system' anywhere but
+            index 0 - this is what broke after resume from compaction)"
+    (let [log [{:type :user-prompt :created-at 1 :text "old, should be dropped"}
+               {:type :compaction-summary :created-at 2 :summary "user asked about X, agent did Y"}
+               {:type :user-prompt :created-at 3 :text "continue where we left off"}
+               {:type :assistant-response :created-at 4 :text "sure, doing that"}]
+          wire (into [{:role "system" :content "you are an agent"}]
+                     (c/conversation->openai-messages (c/visible-messages log)))]
+      (is (= ["system" "user" "user" "assistant"] (mapv :role wire)))
+      (is (= 1 (count (filter #(= "system" (:role %)) wire))))
+      (is (= 0 (.indexOf (mapv :role wire) "system")))
+      (is (str/includes? (:content (second wire)) "user asked about X, agent did Y")))))
 
 ;; ---------------------------------------------------------------------------
 ;; Line wrapping (embedded newlines, oversized tokens)
