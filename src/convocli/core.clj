@@ -234,6 +234,7 @@
   [state]
   (cond
     (has-unresolved-batch? (:conversation-log state)) :reviewing-batch
+    (:summarization-pending? state) :summarizing
     (:completion-pending? state) :awaiting-completion
     :else :composing))
 
@@ -291,6 +292,17 @@
 ;; Commands (async work; see charm.program/cmd)
 ;; ---------------------------------------------------------------------------
 
+(defn batch-cmds
+  "Combines optional cmds, staying nil (rather than an always-truthy,
+  possibly-empty program/batch) when none are present - callers that
+  branch on whether a cmd was returned (e.g. tests) need that distinction."
+  [& cmds]
+  (let [cmds (remove nil? cmds)]
+    (case (count cmds)
+      0 nil
+      1 (first cmds)
+      (apply program/batch cmds))))
+
 (defn request-completion-cmd
   [conversation-log iteration]
   (program/cmd
@@ -345,22 +357,47 @@
            :exit-code nil :executed-at (System/currentTimeMillis)})))))
 
 ;; ---------------------------------------------------------------------------
-;; Compaction (see TriggerCompaction rule)
+;; Compaction (see TriggerCompaction/ReceiveSummarization rules)
 ;; ---------------------------------------------------------------------------
 
-(defn summarize-for-compaction
-  "Black box in the spec. This is an MVP stand-in - a real implementation
-  would likely ask the LLM to summarize; this just notes the cutoff."
-  [log]
-  (str "[compacted " (count log) " earlier messages]"))
+;; Sent as a final "user" message (not a second "system" message - see
+;; message->openai's :compaction-summary case for why strict chat
+;; templates reject a system role anywhere past index 0). The point of
+;; this summary is continuation, not narration: the same LLM has to keep
+;; driving this Event Modeling session afterward on a fraction of the
+;; tokens, so it must preserve model state/decisions/next-steps and
+;; nothing else.
+(def summarization-instruction
+  "Compact the conversation above into a dense summary so you (the same
+  assistant) can keep working on this Event Modeling session afterward
+  having spent as few tokens as possible re-reading history. Preserve:
+  the current state of the event model (events, commands, views,
+  aggregates, slices), concrete decisions already made, files/tools
+  touched and their outcomes, and any outstanding next steps. Drop
+  pleasantries, narration and anything not needed to continue. Output
+  only the summary - no preamble, no headings - as tersely as accuracy
+  allows.")
 
-(defn maybe-compact [log]
-  (if-let [r (latest-assistant-response log)]
-    (if (>= (:total-tokens r 0) (context-window-limit))
-      (conj log {:type :compaction-summary :created-at (System/currentTimeMillis)
-                 :summary (summarize-for-compaction log)})
-      log)
-    log))
+(defn needs-compaction? [response]
+  (>= (:total-tokens response 0) (context-window-limit)))
+
+(defn summarize-conversation-cmd
+  [conversation-log]
+  (program/cmd
+   (fn []
+     (try
+       (let [response (http/post (:llm-endpoint config)
+                                  {:headers {:content-type "application/json"}
+                                   :body (json/encode
+                                          {:model (:llm-model config)
+                                           :messages (into [{:role "system" :content (:system-prompt config)}]
+                                                            (conj (conversation->openai-messages conversation-log)
+                                                                  {:role "user" :content summarization-instruction}))})})
+             body (json/parse-string (:body response) true)
+             choice (:message (first (:choices body)))]
+         {:type :summarization-received :summary (:content choice)})
+       (catch Exception e
+         {:type :summarization-failed :error (ex-message e)})))))
 
 ;; ---------------------------------------------------------------------------
 ;; Batch resolution (see BatchResolved rule)
@@ -437,14 +474,24 @@
                 :conversation-log conversation-log
                 :approval-mode (or approval-mode :manual)
                 :completion-pending? false
+                :summarization-pending? false
                 :terminal-width 120
                 :terminal-height 80})]
     [state (program/batch s-cmd vp-cmd)]))
 
 (defn submit-prompt [state]
   (let [text (str/trim (text-input/value (:llm-query state)))]
-    (if (or (str/blank? text) (not= :composing (tui-mode state)))
+    (cond
+      (or (str/blank? text) (not= :composing (tui-mode state)))
       [state nil]
+
+      (= text "/compact")
+      [(-> state
+           (assoc :summarization-pending? true)
+           (assoc :llm-query (text-input/reset (:llm-query state))))
+       (summarize-conversation-cmd (visible-messages (:conversation-log state)))]
+
+      :else
       (let [new-log (conj (:conversation-log state)
                            {:type :user-prompt :created-at (System/currentTimeMillis) :text text})
             state' (-> state
@@ -462,19 +509,37 @@
                    :batch-iteration iteration
                    :interrupted? false
                    :total-tokens total-tokens}
-        log' (maybe-compact (conj (:conversation-log state) response))
-        state' (assoc state :conversation-log log' :completion-pending? false)]
-    (if (all-calls-resolved? response)
-      (maybe-resolve-batch state')
-      (if-let [cmd (continue-auto-run-cmd log')]
-        [state' cmd]
-        [state' nil]))))
+        log' (conj (:conversation-log state) response)
+        ;; Don't kick off a second summarization while one's already in
+        ;; flight (either automatic or from a prior "/compact").
+        trigger-compaction? (and (needs-compaction? response) (not (:summarization-pending? state)))
+        state' (cond-> (assoc state :conversation-log log' :completion-pending? false)
+                 trigger-compaction? (assoc :summarization-pending? true))
+        compact-cmd (when trigger-compaction? (summarize-conversation-cmd (visible-messages log')))
+        [state'' next-cmd] (if (all-calls-resolved? response)
+                              (maybe-resolve-batch state')
+                              [state' (continue-auto-run-cmd log')])]
+    [state'' (batch-cmds compact-cmd next-cmd)]))
 
 (defn handle-completion-failed [state msg]
   [(-> state
        (update :conversation-log conj
                {:type :llm-error :created-at (System/currentTimeMillis) :error (:error msg)})
        (assoc :completion-pending? false))
+   nil])
+
+(defn handle-summarization-received [state msg]
+  [(-> state
+       (update :conversation-log conj
+               {:type :compaction-summary :created-at (System/currentTimeMillis) :summary (:summary msg)})
+       (assoc :summarization-pending? false))
+   nil])
+
+(defn handle-summarization-failed [state msg]
+  [(-> state
+       (update :conversation-log conj
+               {:type :llm-error :created-at (System/currentTimeMillis) :error (:error msg)})
+       (assoc :summarization-pending? false))
    nil])
 
 (defn handle-tool-call-executed [state msg]
@@ -593,6 +658,12 @@
 
     (= :tool-call-executed (:type msg))
     (handle-tool-call-executed state msg)
+
+    (= :summarization-received (:type msg))
+    (handle-summarization-received state msg)
+
+    (= :summarization-failed (:type msg))
+    (handle-summarization-failed state msg)
 
     :else
     (let [field (:current state)
@@ -755,6 +826,7 @@
   (let [mode (tui-mode state)
         status (case mode
                  :awaiting-completion (str "[-_o] => " (spinner/spinner-view spinner))
+                 :summarizing (str "[-_o] => " (spinner/spinner-view spinner) " compacting...")
                  :reviewing-batch
                  (let [response (latest-assistant-response (:conversation-log state))]
                    (if (= :manual (:batch-approval-mode response))

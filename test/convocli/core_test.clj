@@ -235,7 +235,26 @@
             state {:conversation-log [] :approval-mode :manual :completion-pending? true}
             [state' cmd] (c/handle-completion-received state msg)]
         (is (nil? cmd))
-        (is (= :composing (c/tui-mode state')))))))
+        (is (= :composing (c/tui-mode state')))))
+
+    (testing "total_tokens over the context window automatically kicks off summarization"
+      (with-redefs [c/context-window-limit (constantly 100)]
+        (let [msg {:type :completion-received :iteration 0 :text "just a plain answer"
+                   :tool-call-proposals [] :total-tokens 500}
+              state {:conversation-log [] :approval-mode :manual :completion-pending? true}
+              [state' cmd] (c/handle-completion-received state msg)]
+          (is (some? cmd) "must request a summarization cmd")
+          (is (true? (:summarization-pending? state'))))))
+
+    (testing "does not double-fire summarization while one is already pending"
+      (with-redefs [c/context-window-limit (constantly 100)]
+        (let [msg {:type :completion-received :iteration 0 :text "just a plain answer"
+                   :tool-call-proposals [] :total-tokens 500}
+              state {:conversation-log [] :approval-mode :manual :completion-pending? true
+                     :summarization-pending? true}
+              [state' cmd] (c/handle-completion-received state msg)]
+          (is (nil? cmd))
+          (is (true? (:summarization-pending? state'))))))))
 
 (deftest handle-completion-failed-test
   (testing "records an LlmError and clears completion-pending"
@@ -313,6 +332,59 @@
                {:type :user-prompt :created-at 4 :text "y"}]
           visible (c/visible-messages log)]
       (is (= "second" (:summary (first visible)))))))
+
+(deftest manual-compact-command-test
+  (testing "/compact requests a real summarization from the LLM instead of touching the log directly"
+    (let [log [{:type :user-prompt :created-at 1 :text "hi"}]
+          state {:llm-query (text-input/set-value (text-input/text-input :prompt ":> ") "/compact")
+                 :conversation-log log
+                 :completion-pending? false}
+          [state' cmd] (c/submit-prompt state)]
+      (is (some? cmd) "must request a summarization cmd")
+      (is (true? (:summarization-pending? state')))
+      (is (= log (:conversation-log state')) "no compaction-summary is added until the LLM responds")
+      (is (= "" (text-input/value (:llm-query state'))) "input is cleared like any other submission")))
+
+  (testing "/compact is a no-op while a batch is unresolved or a completion is in flight"
+    (let [busy-log [{:type :assistant-response :batch-approval-mode :manual
+                      :tool-calls [{:id "1" :sequence 0 :status :pending-approval}]}]
+          state {:llm-query (text-input/set-value (text-input/text-input :prompt ":> ") "/compact")
+                 :conversation-log busy-log
+                 :completion-pending? false}
+          [state' cmd] (c/submit-prompt state)]
+      (is (nil? cmd))
+      (is (= busy-log (:conversation-log state')) "no compaction-summary is added while composing is blocked"))))
+
+;; ---------------------------------------------------------------------------
+;; Summarization handling (see ReceiveSummarization rule)
+;; ---------------------------------------------------------------------------
+
+(deftest handle-summarization-received-test
+  (testing "appends a compaction-summary and clears summarization-pending"
+    (let [state {:conversation-log [{:type :user-prompt :created-at 1 :text "hi"}]
+                 :summarization-pending? true}
+          [state' cmd] (c/handle-summarization-received state {:summary "condensed state"})]
+      (is (nil? cmd))
+      (is (false? (:summarization-pending? state')))
+      (is (= :compaction-summary (:type (last (:conversation-log state')))))
+      (is (= "condensed state" (:summary (last (:conversation-log state'))))))))
+
+(deftest handle-summarization-failed-test
+  (testing "records an LlmError and clears summarization-pending rather than losing the earlier history"
+    (let [state {:conversation-log [{:type :user-prompt :created-at 1 :text "hi"}]
+                 :summarization-pending? true}
+          [state' cmd] (c/handle-summarization-failed state {:error "connection refused"})]
+      (is (nil? cmd))
+      (is (false? (:summarization-pending? state')))
+      (is (= :llm-error (:type (last (:conversation-log state')))))
+      (is (= "connection refused" (:error (last (:conversation-log state'))))))))
+
+(deftest tui-mode-summarizing-test
+  (testing "summarizing takes priority over composing, but not over an unresolved batch"
+    (is (= :summarizing (c/tui-mode {:conversation-log [] :summarization-pending? true :completion-pending? false})))
+    (let [unresolved-log [{:type :assistant-response :batch-approval-mode :manual
+                            :tool-calls [{:id "1" :sequence 0 :status :pending-approval}]}]]
+      (is (= :reviewing-batch (c/tui-mode {:conversation-log unresolved-log :summarization-pending? true}))))))
 
 ;; ---------------------------------------------------------------------------
 ;; OpenAI wire-format serialization (id round-trip, tool result correlation)

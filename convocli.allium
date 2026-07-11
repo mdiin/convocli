@@ -47,6 +47,11 @@ value CompletionOutcome {
     total_tokens: Integer?    -- token usage reported by the completion response; absent on error
 }
 
+value SummarizationOutcome {
+    summary: String?    -- absent on error
+    error: String?
+}
+
 value MappingOutcome {
     command: String?
     error: String?
@@ -91,6 +96,13 @@ entity Conversation {
     -- with it stuck true would permanently block the operator with no
     -- way to clear it. Resetting to false on resume is expected.
     completion_pending: Boolean
+
+    -- True from the moment compaction is requested (either automatically
+    -- by TriggerCompaction or on demand via "/compact") until the
+    -- resulting CompactionSummary (or LlmError) arrives. Same non-
+    -- persistence rationale as completion_pending: reset to false on
+    -- resume rather than resuming stuck.
+    summarization_pending: Boolean
 
     messages: Message with conversation = this
     assistant_responses: AssistantResponse with conversation = this
@@ -164,6 +176,12 @@ variant AssistantResponse : Message {
 }
 
 variant CompactionSummary : Message {
+    -- Must be dense and continuation-oriented, not a narrative recap: the
+    -- point is for the same LLM to keep driving this Event Modeling
+    -- session on few tokens, so summarize_conversation should preserve
+    -- current model state (events/commands/views/aggregates/slices),
+    -- concrete decisions and tool outcomes, and outstanding next steps -
+    -- and drop everything else (pleasantries, narration, resolved detail).
     summary: String
 }
 
@@ -240,28 +258,44 @@ config {
 ------------------------------------------------------------
 
 -- Exactly one Conversation exists; convocli always resumes it on launch.
-default Conversation the_conversation = { approval_mode: manual, completion_pending: false }
+default Conversation the_conversation = { approval_mode: manual, completion_pending: false, summarization_pending: false }
 
 ------------------------------------------------------------
 -- Rules
 ------------------------------------------------------------
 
 -- @guidance
---     request_completion, apply_mapper and run_command wrap genuinely
---     non-deterministic, side-effecting operations (a network call to the
---     LLM endpoint, evaluating user-authored SCI source, spawning a shell
---     process). They are modelled as black box functions because Allium
---     has no other construct for external interaction, not because they
---     are pure.
+--     request_completion, summarize_conversation, apply_mapper and
+--     run_command wrap genuinely non-deterministic, side-effecting
+--     operations (a network call to the LLM endpoint - summarization is
+--     its own such call, not a pure function - evaluating user-authored
+--     SCI source, spawning a shell process). They are modelled as black
+--     box functions because Allium has no other construct for external
+--     interaction, not because they are pure.
 
 rule UserSubmitsMessage {
     when: UserSubmitsPrompt(operator, conversation, text)
+    requires: text != "/compact"
     requires: not conversation.has_unresolved_batch
     requires: not conversation.completion_pending
     ensures:
         UserPrompt.created(conversation: conversation, created_at: now, text: text)
         conversation.completion_pending = true
         RequestLlmCompletion(conversation: conversation, iteration: 0)
+}
+
+rule UserTriggersCompaction {
+    -- "/compact" is a client-side command, not a message to the LLM: it
+    -- forces the same summarization outcome as TriggerCompaction's
+    -- automatic token-limit check, on demand.
+    when: UserSubmitsPrompt(operator, conversation, text)
+    requires: text = "/compact"
+    requires: not conversation.has_unresolved_batch
+    requires: not conversation.completion_pending
+    requires: not conversation.summarization_pending
+    ensures:
+        conversation.summarization_pending = true
+        RequestSummarization(conversation: conversation)
 }
 
 rule RequestCompletion {
@@ -414,12 +448,21 @@ rule TriggerCompaction {
     when: response: AssistantResponse.created
     let window_limit = config.context_window_override ?? advertised_context_window(config.llm_model)
     requires: response.total_tokens >= window_limit
+    requires: not response.conversation.summarization_pending
     ensures:
-        CompactionSummary.created(
-            conversation: response.conversation,
-            created_at: now,
-            summary: summarize(response.conversation.visible_messages)
-        )
+        response.conversation.summarization_pending = true
+        RequestSummarization(conversation: response.conversation)
+}
+
+rule ReceiveSummarization {
+    when: RequestSummarization(conversation)
+    let outcome = summarize_conversation(conversation.visible_messages, config.llm_endpoint, config.llm_model)
+    ensures:
+        conversation.summarization_pending = false
+        if exists outcome.error:
+            LlmError.created(conversation: conversation, created_at: now, error: outcome.error)
+        else:
+            CompactionSummary.created(conversation: conversation, created_at: now, summary: outcome.summary)
 }
 
 ------------------------------------------------------------
@@ -435,10 +478,11 @@ surface ConvocliSession {
         conversation.approval_mode
         conversation.visible_messages
         conversation.completion_pending
+        conversation.summarization_pending
 
     provides:
         UserSubmitsPrompt(operator, conversation, text)
-            when not conversation.has_unresolved_batch and not conversation.completion_pending
+            when not conversation.has_unresolved_batch and not conversation.completion_pending and not conversation.summarization_pending
         UserSetsApprovalMode(operator, conversation, mode)
 
     related:
