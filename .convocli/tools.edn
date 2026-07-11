@@ -52,8 +52,11 @@
     {:type "number",
      :description "from parameter (ref: elements[].id)"},
     "to"
+    {:type "number", :description "to parameter (ref: elements[].id)"},
+    "id"
     {:type "number",
-     :description "to parameter (ref: elements[].id)"}},
+     :description
+     "pre-assign this entity's id instead of auto-generating one; must not already be in use"}},
    :required ["from" "to"]},
   :mapper-source
   (fn
@@ -411,7 +414,11 @@
     "kind"
     {:type "string",
      :description "kind parameter",
-     :enum ["command" "event" "read_model" "screen" "automation"]}},
+     :enum ["command" "event" "read_model" "screen" "automation"]},
+    "id"
+    {:type "number",
+     :description
+     "pre-assign this entity's id instead of auto-generating one; must not already be in use"}},
    :required ["name" "kind"]},
   :mapper-source
   (fn
@@ -441,7 +448,11 @@
      :description "slice parameter (ref: timelines[].slices[].id)"},
     "element"
     {:type "number",
-     :description "element parameter (ref: elements[].id)"}},
+     :description "element parameter (ref: elements[].id)"},
+    "id"
+    {:type "number",
+     :description
+     "pre-assign this entity's id instead of auto-generating one; must not already be in use"}},
    :required ["slice" "element"]},
   :mapper-source
   (fn
@@ -531,7 +542,11 @@
     {:type "string",
      :description "kind parameter",
      :enum ["state_change" "state_view" "automation"]},
-    "index" {:type "number", :description "index parameter"}},
+    "index" {:type "number", :description "index parameter"},
+    "id"
+    {:type "number",
+     :description
+     "pre-assign this entity's id instead of auto-generating one; must not already be in use"}},
    :required ["timeline" "title" "kind" "index"]},
   :mapper-source
   (fn
@@ -676,7 +691,11 @@
    {"slice"
     {:type "number",
      :description "slice parameter (ref: timelines[].slices[].id)"},
-    "title" {:type "string", :description "title parameter"}},
+    "title" {:type "string", :description "title parameter"},
+    "id"
+    {:type "number",
+     :description
+     "pre-assign this entity's id instead of auto-generating one; must not already be in use"}},
    :required ["slice" "title"]},
   :mapper-source
   (fn
@@ -740,7 +759,11 @@
     "element"
     {:type "number",
      :description "element parameter (ref: elements[].id)"},
-    "index" {:type "number", :description "index parameter"}},
+    "index" {:type "number", :description "index parameter"},
+    "id"
+    {:type "number",
+     :description
+     "pre-assign this entity's id instead of auto-generating one; must not already be in use"}},
    :required ["spec" "clause" "element" "index"]},
   :mapper-source
   (fn
@@ -770,7 +793,11 @@
      :description
      "spec parameter (ref: timelines[].slices[].specifications[].id)"},
     "error-name" {:type "string", :description "error-name parameter"},
-    "index" {:type "number", :description "index parameter"}},
+    "index" {:type "number", :description "index parameter"},
+    "id"
+    {:type "number",
+     :description
+     "pre-assign this entity's id instead of auto-generating one; must not already be in use"}},
    :required ["spec" "error-name" "index"]},
   :mapper-source
   (fn
@@ -883,7 +910,11 @@
   {:type "object",
    :properties
    {"name" {:type "string", :description "name parameter"},
-    "index" {:type "number", :description "index parameter"}},
+    "index" {:type "number", :description "index parameter"},
+    "id"
+    {:type "number",
+     :description
+     "pre-assign this entity's id instead of auto-generating one; must not already be in use"}},
    :required ["name" "index"]},
   :mapper-source
   (fn
@@ -991,7 +1022,11 @@
   :parameters-schema
   {:type "object",
    :properties
-   {"title" {:type "string", :description "title parameter"}},
+   {"title" {:type "string", :description "title parameter"},
+    "id"
+    {:type "number",
+     :description
+     "pre-assign this entity's id instead of auto-generating one; must not already be in use"}},
    :required ["title"]},
   :mapper-source
   (fn
