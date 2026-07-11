@@ -825,7 +825,17 @@
   message), since short lines often wrap identically at any width, so
   the unchanged-text check alone would never notice that scroll-to-bottom
   now has a real height to compute against instead of the 0 it started
-  with."
+  with.
+
+  Every keypress (including plain scrolling) runs through here, so
+  conversation-display-text - a full mapcat/wrap-text over the entire
+  log - must not be recomputed unless the log or width actually
+  changed; otherwise scrolling a long conversation redoes O(log size)
+  work per line scrolled, and gets slower as the log grows even though
+  scroll keys never touch it. :display-text-cache remembers the inputs
+  (conversation-log compared by identity, which is O(1) and correct
+  since state is only ever updated with persistent-data-structure
+  assoc/update, never mutated in place) and the resulting text."
   ([state] (sync-viewport-content state false))
   ([state force?]
    (let [width (page-width (:terminal-width state))
@@ -835,7 +845,12 @@
          ;; matching the original fixed budget exactly).
          height (max 1 (- (or (:terminal-height state) 80) 11 (count (footer-lines state))))
          state (update state :viewport #(viewport/viewport-set-dimensions % width height))
-         text (conversation-display-text (:conversation-log state) width)]
+         log (:conversation-log state)
+         cache (:display-text-cache state)
+         text (if (and cache (identical? (:log cache) log) (= (:width cache) width))
+                (:text cache)
+                (conversation-display-text log width))
+         state (assoc state :display-text-cache {:log log :width width :text text})]
      (if (and (not force?) (= text (viewport/viewport-content (:viewport state))))
        state
        (update state :viewport #(-> % (viewport/viewport-set-content text) viewport/scroll-to-bottom))))))
