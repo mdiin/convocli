@@ -39,12 +39,16 @@
     "                            (shell-quote (if (string? v) v (json-encode v)))))\n"
     "                     args)))))")))
 
-(defn command->tool-config [group-name cmd-name cmd-def]
+(defn command->tool-config
+  "group-name is nil for top-level commands (manifest's :commands map,
+  e.g. `resolve`), which have no group prefix on either the CLI
+  invocation or the tool name."
+  [group-name cmd-name cmd-def]
   (let [params (:params cmd-def)
         props (into {} (map (fn [p] [(:flag p) (param->property p)]) params))
         required (vec (map :flag (filter :required params)))
-        cli-prefix (str (name group-name) " " (name cmd-name))]
-    {:name (str (name group-name) "_" (name cmd-name))
+        cli-prefix (if group-name (str (name group-name) " " (name cmd-name)) (name cmd-name))]
+    {:name (if group-name (str (name group-name) "_" (name cmd-name)) (name cmd-name))
      :description (str "Runs `" cli-prefix "` on the Event Modeling CLI")
      :parameters-schema {:type "object"
                          :properties props
@@ -52,11 +56,14 @@
      :mapper-source (generic-mapper-source (str "emcli " cli-prefix))}))
 
 (defn manifest->tool-configs [manifest]
-  (vec (mapcat (fn [[group-name commands]]
-                 (map (fn [[cmd-name cmd-def]]
-                        (command->tool-config group-name cmd-name cmd-def))
-                      commands))
-               (:groups manifest))))
+  (vec (concat
+        (map (fn [[cmd-name cmd-def]] (command->tool-config nil cmd-name cmd-def))
+             (:commands manifest))
+        (mapcat (fn [[group-name commands]]
+                  (map (fn [[cmd-name cmd-def]]
+                         (command->tool-config group-name cmd-name cmd-def))
+                       commands))
+                (:groups manifest)))))
 
 (defn -main [& [manifest-path out-path]]
   (let [manifest-path (or manifest-path "../thecli/manifest.json")

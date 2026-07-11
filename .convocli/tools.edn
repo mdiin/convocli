@@ -15,6 +15,34 @@
   :description
   "Runs `validate` on the Event Modeling CLI to get any validation errors on the model",
   :mapper-source (fn [_] "emcli validate")}
+ {:name "resolve",
+  :description "Runs `resolve` on the Event Modeling CLI",
+  :parameters-schema
+  {:type "object",
+   :properties
+   {"queries"
+    {:type "string",
+     :description
+     "comma-separated name[:kind_hint] entries, e.g. \"Baz:slice,Snaz\"; kind_hint is one of timeline|swimlane|slice|element|specification and only ranks candidates, never filters them"}},
+   :required ["queries"]},
+  :mapper-source
+  (fn
+   [args-json]
+   (let
+    [args (json-parse args-json)]
+    (str
+     "emcli resolve"
+     (apply
+      str
+      (map
+       (fn
+        [[k v]]
+        (str
+         " --"
+         (name k)
+         " "
+         (shell-quote (if (string? v) v (json-encode v)))))
+       args)))))}
  {:name "connection_add",
   :description "Runs `connection add` on the Event Modeling CLI",
   :parameters-schema
