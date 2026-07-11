@@ -104,6 +104,14 @@ entity Conversation {
     -- resume rather than resuming stuck.
     summarization_pending: Boolean
 
+    -- True when a next-completion request was parked because a compaction
+    -- was still in flight when a batch resolved (see BatchResolved). It is
+    -- replayed once summarization clears (see ResumeAfterSummarization).
+    -- Same non-persistence rationale as completion_pending/summarization_-
+    -- pending: reset to false on resume rather than resuming stuck, since
+    -- nothing would ever replay the parked request after a crash.
+    resume_pending: Boolean
+
     messages: Message with conversation = this
     assistant_responses: AssistantResponse with conversation = this
     compaction_messages: messages where kind = CompactionSummary
@@ -169,6 +177,12 @@ variant AssistantResponse : Message {
     -- Derived
     all_calls_resolved: tool_calls.count > 0 and tool_calls.all(c => c.status in {executed, rejected, interrupted})
     skipped_calls: tool_calls where status = interrupted
+
+    -- True if this response never opened a tool-call batch, or its batch
+    -- is now fully resolved. Compaction must only trigger on a settled
+    -- response (see TriggerCompaction) so the eventual visible_messages
+    -- cut can never land mid-batch and silently drop in-flight calls.
+    settled: tool_calls.count = 0 or all_calls_resolved
 
     -- Approval is strictly sequential: only the lowest-sequence pending
     -- call can be approved/rejected at any moment. Null once none remain.
@@ -258,7 +272,7 @@ config {
 ------------------------------------------------------------
 
 -- Exactly one Conversation exists; convocli always resumes it on launch.
-default Conversation the_conversation = { approval_mode: manual, completion_pending: false, summarization_pending: false }
+default Conversation the_conversation = { approval_mode: manual, completion_pending: false, summarization_pending: false, resume_pending: false }
 
 ------------------------------------------------------------
 -- Rules
@@ -438,9 +452,17 @@ rule BatchResolved {
         else:
             if response.batch_approval_mode = auto_run and response.batch_iteration >= config.max_auto_iterations:
                 AutoCapReached.created(conversation: response.conversation, created_at: now, iterations_run: response.batch_iteration)
+            else if response.conversation.summarization_pending:
+                -- A compaction is still in flight. Park the next completion
+                -- rather than requesting it now: a fresh response could be
+                -- appended before the summary and then silently excised the
+                -- moment the summary is created after it. ResumeAfterSummar-
+                -- ization replays this decision once the cut is safe.
+                response.conversation.resume_pending = true
             else:
                 let next_iteration = if response.batch_approval_mode = auto_run: response.batch_iteration + 1 else: 0
                 response.conversation.completion_pending = true
+                response.conversation.resume_pending = false
                 RequestLlmCompletion(conversation: response.conversation, iteration: next_iteration)
 }
 
@@ -449,6 +471,9 @@ rule TriggerCompaction {
     let window_limit = config.context_window_override ?? advertised_context_window(config.llm_model)
     requires: response.total_tokens >= window_limit
     requires: not response.conversation.summarization_pending
+    -- Never trigger while this response still has an open batch: wait for
+    -- it to fully resolve so the eventual cut can't land mid-batch.
+    requires: response.settled
     ensures:
         response.conversation.summarization_pending = true
         RequestSummarization(conversation: response.conversation)
@@ -463,6 +488,27 @@ rule ReceiveSummarization {
             LlmError.created(conversation: conversation, created_at: now, error: outcome.error)
         else:
             CompactionSummary.created(conversation: conversation, created_at: now, summary: outcome.summary)
+}
+
+rule ResumeAfterSummarization {
+    -- Fires once the compaction that parked a next-completion request has
+    -- cleared (summarization_pending back to false, whether the summary
+    -- arrived or the LLM errored). The cut is now safe, so replay the same
+    -- decision BatchResolved deferred, against the response that resolved.
+    when: conversation: Conversation.summarization_pending transitions_to false
+    requires: conversation.resume_pending
+    let response = max_by(conversation.assistant_responses, r => r.created_at)
+    ensures:
+        conversation.resume_pending = false
+        if response.interrupted:
+            AutoRunInterrupted.created(conversation: conversation, created_at: now, calls_skipped: response.skipped_calls.count)
+        else:
+            if response.batch_approval_mode = auto_run and response.batch_iteration >= config.max_auto_iterations:
+                AutoCapReached.created(conversation: conversation, created_at: now, iterations_run: response.batch_iteration)
+            else:
+                let next_iteration = if response.batch_approval_mode = auto_run: response.batch_iteration + 1 else: 0
+                conversation.completion_pending = true
+                RequestLlmCompletion(conversation: conversation, iteration: next_iteration)
 }
 
 ------------------------------------------------------------

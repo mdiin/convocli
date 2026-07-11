@@ -214,6 +214,17 @@
   (and (batch? response)
        (every? #(contains? terminal-statuses (:status %)) (:tool-calls response))))
 
+(defn response-settled?
+  "True when a response has no calls awaiting approval or execution -
+  either it proposed none, or every proposed call has reached a terminal
+  status. Compaction must only trigger on a settled response (see
+  handle-completion-received): visible-messages cuts the log by index at
+  whatever moment the summary happens to land, so summarizing while a
+  batch is still open risks the cut landing between the batch and its
+  eventual resolution, silently dropping it from context/display."
+  [response]
+  (or (not (batch? response)) (all-calls-resolved? response)))
+
 (defn latest-assistant-response-idx [log]
   (last (keep-indexed (fn [i m] (when (= :assistant-response (:type m)) i)) log)))
 
@@ -426,11 +437,21 @@
                   :iterations-run (:batch-iteration response)})
          nil]
 
+        ;; A compaction (triggered by this same response settling, or by
+        ;; an earlier one still in flight) must finish before any more
+        ;; log-mutating cmd fires - otherwise the next completion could
+        ;; land, get appended, and then get excised the moment the
+        ;; summary arrives after it (see response-settled?). Park the
+        ;; request; handle-summarization-received/-failed re-runs this
+        ;; fn once summarization-pending? clears.
+        (:summarization-pending? state)
+        [(assoc state :resume-pending? true) nil]
+
         :else
         (let [next-iteration (if (= :auto-run (:batch-approval-mode response))
                                 (inc (:batch-iteration response))
                                 0)
-              state' (assoc state :completion-pending? true)]
+              state' (assoc state :completion-pending? true :resume-pending? false)]
           [state' (request-completion-cmd (visible-messages (:conversation-log state')) next-iteration)]))
       [state nil])))
 
@@ -511,8 +532,13 @@
                    :total-tokens total-tokens}
         log' (conj (:conversation-log state) response)
         ;; Don't kick off a second summarization while one's already in
-        ;; flight (either automatic or from a prior "/compact").
-        trigger-compaction? (and (needs-compaction? response) (not (:summarization-pending? state)))
+        ;; flight (either automatic or from a prior "/compact"), and
+        ;; don't kick one off at all while this response still has an
+        ;; open batch (see response-settled?) - wait for it to resolve
+        ;; first so the eventual cut can't land mid-batch.
+        trigger-compaction? (and (needs-compaction? response)
+                                  (not (:summarization-pending? state))
+                                  (response-settled? response))
         state' (cond-> (assoc state :conversation-log log' :completion-pending? false)
                  trigger-compaction? (assoc :summarization-pending? true))
         compact-cmd (when trigger-compaction? (summarize-conversation-cmd (visible-messages log')))
@@ -528,19 +554,28 @@
        (assoc :completion-pending? false))
    nil])
 
+(defn resume-after-summarization
+  "Re-runs the completion/tool-call request that maybe-resolve-batch
+  parked while this summarization was in flight (see its
+  :summarization-pending? branch). No-op if nothing was parked."
+  [state]
+  (if (:resume-pending? state)
+    (maybe-resolve-batch (dissoc state :resume-pending?))
+    [state nil]))
+
 (defn handle-summarization-received [state msg]
-  [(-> state
+  (resume-after-summarization
+   (-> state
        (update :conversation-log conj
                {:type :compaction-summary :created-at (System/currentTimeMillis) :summary (:summary msg)})
-       (assoc :summarization-pending? false))
-   nil])
+       (assoc :summarization-pending? false))))
 
 (defn handle-summarization-failed [state msg]
-  [(-> state
+  (resume-after-summarization
+   (-> state
        (update :conversation-log conj
                {:type :llm-error :created-at (System/currentTimeMillis) :error (:error msg)})
-       (assoc :summarization-pending? false))
-   nil])
+       (assoc :summarization-pending? false))))
 
 (defn handle-tool-call-executed [state msg]
   (let [log' (update-latest-response (:conversation-log state)
